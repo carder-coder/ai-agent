@@ -108,7 +108,8 @@ class DoubaoClient:
                     if frag.id:
                         slot["id"] = frag.id
                     if frag.function and frag.function.name:
-                        slot["name"] = frag.function.name
+                        # 名字也可能被切成多片，拼接而不是覆盖
+                        slot["name"] += frag.function.name
                     if frag.function and frag.function.arguments:
                         slot["args"].append(frag.function.arguments)
         except APITimeoutError as exc:
