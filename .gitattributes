@@ -1,0 +1,28 @@
+# 统一换行：仓库内一律 LF，Windows 检出后由 git 负责转换
+* text=auto eol=lf
+
+# 明确按文本处理
+*.py   text eol=lf
+*.md   text eol=lf
+*.toml text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.ndjson text eol=lf
+*.jsonl text eol=lf
+*.sh   text eol=lf
+
+# PowerShell 脚本必须 CRLF
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# 二进制
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.pdf  binary
+*.docx binary
+*.xlsx binary
+*.zip  binary
