@@ -59,3 +59,16 @@ docs/adr/          关键决策记录
 docs/experiments/  实验记录，与代码同次提交
 scripts/           一次性脚本
 ```
+
+## 远程仓库
+
+origin 指向 https://github.com/carder-coder/ai-agent.git，主分支 main。
+
+本机直连 github.com 的 443 会被重置，仓库级配置已写入 http.proxy=http://127.0.0.1:7897
+（只对当前仓库生效，不动全局配置）。代理未启动时推送会报连接失败，先起代理再推。
+
+凭据由 Git Credential Manager 保管，首次推送会弹 GitHub 登录，登录一次后不再询问；
+不要用账号密码，GitHub 已不支持。换机器时重复一次登录即可。
+
+推完自检三件事：git status -sb 显示 main...origin/main 且无 ahead；git ls-remote origin
+的 HEAD 与本地 git log -1 的哈希一致；远端文件清单里没有 .env。
