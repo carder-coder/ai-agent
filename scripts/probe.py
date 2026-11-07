@@ -10,8 +10,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import statistics
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -19,7 +22,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from openai import OpenAI  # noqa: E402
 
 from agent.cli.main import load_dotenv  # noqa: E402
-from agent.llm import DoubaoClient, ProviderError, ProviderRateLimited  # noqa: E402
+from agent.llm import DoubaoClient, Message, ProviderRateLimited, ToolCall  # noqa: E402
+
+ADD_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "add",
+            "description": "计算两个整数之和",
+            "parameters": {
+                "type": "object",
+                "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+                "required": ["a", "b"],
+            },
+        },
+    }
+]
 
 
 def show(name: str, ok: bool, detail: str) -> bool:
@@ -29,65 +47,58 @@ def show(name: str, ok: bool, detail: str) -> bool:
 
 def case_stream() -> bool:
     client = DoubaoClient()
-    from agent.llm import Message
+    ttfts: list[int] = []
+    last = None
+    for _ in range(3):
+        resp = client.complete([Message(role="user", content="用一句话说明什么是幂等。")])
+        if resp.first_byte_ms is not None:
+            ttfts.append(resp.first_byte_ms)
+        last = resp
 
-    resp = client.complete([Message(role="user", content="用一句话说明什么是幂等。")])
+    assert last is not None
+    usage = last.usage
+    p50 = int(statistics.median(ttfts)) if ttfts else -1
     ok = (
-        resp.first_byte_ms is not None
-        and resp.usage.total_tokens > 0
-        and resp.finish_reason in {"stop", "tool_calls"}
-        and bool(resp.message.content)
+        bool(ttfts)
+        and usage.input_tokens > 0
+        and usage.output_tokens > 0
+        and usage.total_tokens > 0
+        and last.finish_reason in {"stop", "tool_calls"}
+        and bool(last.message.content)
     )
-    return show(
-        "流式对话",
-        ok,
-        f"首字节 {resp.first_byte_ms}ms 总耗时 {resp.latency_ms}ms "
-        f"usage(in={resp.usage.input_tokens}, out={resp.usage.output_tokens}) "
-        f"finish_reason={resp.finish_reason}",
+    detail = (
+        f"首字节 {ttfts} ms，P50 {p50}ms，总耗时 {last.latency_ms}ms，"
+        f"usage(in={usage.input_tokens}, out={usage.output_tokens}, total={usage.total_tokens}, "
+        f"cached={usage.cached_tokens}) finish_reason={last.finish_reason}"
     )
+    print(f"[INFO] 模型 {client.model}")
+    if p50 > 1000:
+        print(f"[WARN] P50 {p50}ms 超过 1 秒目标：先排除冷启动，换 mini 档再量一次")
+    return show("流式对话", ok, detail)
 
 
 def case_tools() -> bool:
-    client = OpenAI(
-        api_key=os.environ["ARK_API_KEY"],
-        base_url=os.environ.get("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
+    client = DoubaoClient()
+    resp = client.complete(
+        [Message(role="user", content="用 add 工具算 17 加 25。")], tools=ADD_TOOL
     )
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "add",
-                "description": "计算两个整数之和",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
-                    "required": ["a", "b"],
-                },
-            },
-        }
-    ]
-    resp = client.chat.completions.create(
-        model=os.environ["ARK_MODEL"],
-        messages=[{"role": "user", "content": "用 add 工具算 17 加 25。"}],
-        tools=tools,
-    )
-    calls = resp.choices[0].message.tool_calls or []
-    ok = len(calls) == 1
-    detail = "没有触发工具调用"
+    calls: list[ToolCall] = resp.message.tool_calls
+    ok = len(calls) == 1 and calls[0].name == "add"
+    detail = f"tool_calls={[(c.name, c.arguments) for c in calls]}"
     if ok:
-        c = calls[0]
-        detail = f"tool_calls=[{c.function.name}({c.function.arguments})]"
         try:
-            args = json.loads(c.function.arguments)
-            ok = args.get("a") + args.get("b") == 42 or {"a", "b"} <= set(args)
+            args = json.loads(calls[0].arguments)
+            ok = args.get("a") == 17 and args.get("b") == 25
         except json.JSONDecodeError:
             ok = False
-            detail += " 参数不是合法 JSON"
-    return show("工具调用", ok, detail)
+            detail += " 参数不是合法 JSON（分片拼接有问题）"
+        if not ok:
+            detail += " 参数不是 17 与 25"
+    return show("工具调用（走适配层）", ok, detail)
 
 
 def case_unreachable() -> bool:
-    bad = OpenAI(api_key="placeholder", base_url="http://127.0.0.1:9/v1", timeout=2)
+    bad = OpenAI(api_key="placeholder", base_url="http://127.0.0.1:9/v1", timeout=2, max_retries=0)
     t0 = time.perf_counter()
     try:
         bad.chat.completions.create(model="x", messages=[{"role": "user", "content": "hi"}])
@@ -100,33 +111,71 @@ def case_unreachable() -> bool:
     return show("不可达地址", False, "居然成功了，地址配置有问题")
 
 
-def _retry(fn, attempts: int = 3, base: float = 1.0) -> tuple[int, list[float]]:
-    """指数退避：1s、2s、4s。只对限流生效，其余错误直接抛。"""
-    delays: list[float] = []
-    for i in range(attempts + 1):
-        try:
-            fn()
-            return i + 1, delays
-        except ProviderRateLimited:
-            if i == attempts:
-                raise
-            d = base * (2**i)
-            delays.append(d)
-            time.sleep(d)
-    raise ProviderError("unreachable")
+class _StubHandler(BaseHTTPRequestHandler):
+    hits = 0
+    fail_times = 2
+
+    def do_POST(self) -> None:  # noqa: N802 标准库要求的名字
+        type(self).hits += 1
+        if type(self).hits <= type(self).fail_times:
+            body = json.dumps(
+                {"error": {"message": "stub rate limit", "type": "rate_limit_error", "code": "429"}}
+            ).encode()
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        chunks = [
+            {"choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": None}]},
+            {
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            },
+        ]
+        payload = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+        body = payload.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args) -> None:
+        return
 
 
 def case_backoff() -> bool:
-    calls = {"n": 0}
-
-    def flaky() -> None:
-        calls["n"] += 1
-        if calls["n"] <= 2:
-            raise ProviderRateLimited("桩：模拟 429")
-
-    tries, delays = _retry(flaky, attempts=3, base=0.2)
-    ok = tries == 3 and delays == [0.2, 0.4]
-    return show("429 退避", ok, f"尝试 {tries} 次，间隔 {delays} 秒（本地桩，真实 429 需压测触发）")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _StubHandler)
+    port = server.server_address[1]
+    th = threading.Thread(target=server.serve_forever, daemon=True)
+    th.start()
+    try:
+        client = DoubaoClient(
+            model="stub", api_key="stub", base_url=f"http://127.0.0.1:{port}/v1", timeout=10
+        )
+        t0 = time.perf_counter()
+        try:
+            resp = client.complete([Message(role="user", content="hi")])
+        except ProviderRateLimited:
+            return show("429 退避", False, f"重试用尽仍被限流，命中 {_StubHandler.hits} 次")
+        waited = round(time.perf_counter() - t0, 2)
+        ok = (
+            _StubHandler.hits == 3
+            and client.last_attempts == 3
+            and client.last_retry_delays == [1.0, 2.0]
+            and resp.usage.total_tokens == 5
+        )
+        detail = (
+            f"命中 {_StubHandler.hits} 次，间隔 {client.last_retry_delays} 秒，"
+            f"实际等待 {waited}s，最终 usage total={resp.usage.total_tokens}"
+        )
+        return show("429 退避（真实客户端 + 本地 429 桩）", ok, detail)
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def main() -> int:
@@ -143,13 +192,13 @@ def main() -> int:
         print("缺少 ARK_API_KEY：先把 .env.example 复制为 .env 并填入密钥")
         return 2
 
+    picked = ["stream", "tools", "unreachable", "backoff"] if args.case == "all" else [args.case]
     table = {
         "stream": case_stream,
         "tools": case_tools,
         "unreachable": case_unreachable,
         "backoff": case_backoff,
     }
-    picked = list(table) if args.case == "all" else [args.case]
     results = [table[name]() for name in picked]
     print()
     print(f"结论：{sum(results)}/{len(results)} 通过")

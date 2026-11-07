@@ -17,6 +17,7 @@ SKIP_DIRS = {
     ".ruff_cache",
     "node_modules",
     "traces",
+    "out",
 }
 
 
@@ -63,6 +64,7 @@ def make_search_files(root: Path):
         except re.error as exc:
             return f"正则不合法：{exc}"
         hits: list[str] = []
+        total = 0
         scanned = 0
         for path in sorted(root.rglob(args.glob)):
             if any(part in SKIP_DIRS for part in path.parts) or not path.is_file():
@@ -76,15 +78,15 @@ def make_search_files(root: Path):
             scanned += 1
             for no, line in enumerate(text.splitlines(), 1):
                 if rx.search(line):
-                    hits.append(f"{path.relative_to(root).as_posix()}:{no}: {line.strip()[:120]}")
-                    if len(hits) >= args.limit:
-                        break
-            if len(hits) >= args.limit:
-                break
-        if not hits:
+                    total += 1
+                    if len(hits) < args.limit:
+                        rel = path.relative_to(root).as_posix()
+                        hits.append(f"{rel}:{no}: {line.strip()[:120]}")
+        if not total:
             return f"扫描 {scanned} 个文件，没有命中「{args.pattern}」"
-        return (
-            f"扫描 {scanned} 个文件，命中 {len(hits)} 条（上限 {args.limit}）：\n" + "\n".join(hits)
-        )
+        head = f"扫描 {scanned} 个文件，命中 {total} 行"
+        if total > len(hits):
+            head += f"，下面只列前 {len(hits)} 条（命中总数以上面的数字为准）"
+        return head + "：\n" + "\n".join(hits)
 
     return search_files

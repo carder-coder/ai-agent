@@ -17,6 +17,17 @@ TIMEOUT_S = 10
 MAX_OUTPUT = 4000
 
 
+def _cut(text: str, label: str) -> str:
+    """超长输出必须显式标注截断，否则模型会把部分结果当全量。"""
+    if len(text) <= MAX_OUTPUT:
+        return text
+    return (
+        text[:MAX_OUTPUT]
+        + f"\n（{label} 已截断：原 {len(text)} 字符，仅显示前 {MAX_OUTPUT}；"
+        "请缩小范围或改用 --max-count 重跑，不要按此结果给出总数）"
+    )
+
+
 class RunShellArgs(BaseModel):
     command: str = Field(description="要执行的命令，例如 git status --short 或 rg -n TODO src")
     timeout_s: int = Field(default=TIMEOUT_S, ge=1, le=TIMEOUT_S, description="超时秒数，上限 10")
@@ -56,9 +67,9 @@ def make_run_shell(root: Path):
         err = (proc.stderr or "").strip()
         text = f"退出码 {proc.returncode}"
         if out:
-            text += f"\n[stdout]\n{out[:MAX_OUTPUT]}"
+            text += f"\n[stdout]\n{_cut(out, 'stdout')}"
         if err:
-            text += f"\n[stderr]\n{err[:MAX_OUTPUT]}"
+            text += f"\n[stderr]\n{_cut(err, 'stderr')}"
         return text
 
     return run_shell

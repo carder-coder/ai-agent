@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -52,8 +53,25 @@ def test_search_files_counts(repo: Path) -> None:
     reg = build_registry(repo)
     out = reg.invoke("search_files", '{"pattern": "TODO|FIXME", "glob": "*.py", "limit": 10}')
     assert out.ok
-    assert "命中 2 条" in out.content
+    assert "命中 2 行" in out.content
     assert "src/demo.py:1" in out.content
+
+
+def test_search_files_total_when_limit_hit(repo: Path) -> None:
+    (repo / "src" / "many.py").write_text("\n".join(["# TODO"] * 10) + "\n", encoding="utf-8")
+    reg = build_registry(repo)
+    out = reg.invoke("search_files", '{"pattern": "TODO", "glob": "*.py", "limit": 3}')
+    assert out.ok
+    assert "命中 11 行" in out.content  # 10 行新造的 + demo.py 里 1 行
+    assert "只列前 3 条" in out.content
+
+
+def test_shell_marks_truncation(repo: Path) -> None:
+    reg = build_registry(repo)
+    payload = json.dumps({"command": 'python -c "print(\'x\'*6000)"'})
+    out = reg.invoke("run_shell", payload)
+    assert out.ok
+    assert "已截断" in out.content
 
 
 def test_run_shell_blocks_dangerous(repo: Path) -> None:

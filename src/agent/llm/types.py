@@ -64,6 +64,7 @@ class LLMResponse:
     finish_reason: str = "stop"
     first_byte_ms: int | None = None
     latency_ms: int | None = None
+    attempts: int = 1  # 本次调用实际发了几次请求（含退避重试）
 
 
 class ProviderError(RuntimeError):

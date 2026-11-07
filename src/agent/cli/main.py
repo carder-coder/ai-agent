@@ -59,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[steps] {result.steps}（{result.stop_reason}）")
         print(
             f"[tokens] 输入 {result.usage.input_tokens} / 输出 {result.usage.output_tokens}"
-            f" / 合计 {result.usage.total_tokens}"
+            f" / 合计 {result.usage.total_tokens}（缓存命中 {result.usage.cached_tokens}）"
         )
         print(f"[cost] {result.cost_yuan:.6f} 元")
         print(f"[trace] {result.trace_path}")

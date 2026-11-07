@@ -5,6 +5,7 @@
 
 # 运行产物
 traces/
+out/
 *.log
 .logs/
 eval_output/

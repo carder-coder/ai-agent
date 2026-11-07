@@ -54,7 +54,9 @@ class Tracer:
                 "in": response.usage.input_tokens,
                 "out": response.usage.output_tokens,
                 "total": response.usage.total_tokens,
+                "cached": response.usage.cached_tokens,
             },
+            attempts=getattr(response, "attempts", 1),
             cost_yuan=round(c, 6),
             tool_calls=[c2.name for c2 in response.message.tool_calls],
         )
@@ -77,6 +79,7 @@ class Tracer:
                 "in": self.total_usage.input_tokens,
                 "out": self.total_usage.output_tokens,
                 "total": self.total_usage.total_tokens,
+                "cached": self.total_usage.cached_tokens,
             },
             **payload,
         )
