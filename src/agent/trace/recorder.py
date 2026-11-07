@@ -10,16 +10,22 @@ from pathlib import Path
 
 from ..llm.types import Usage
 
-PRICE_IN = float(os.environ.get("ARK_PRICE_IN", "6"))
-PRICE_OUT = float(os.environ.get("ARK_PRICE_OUT", "30"))
-PRICE_CACHED = float(os.environ.get("ARK_PRICE_CACHED", "1.2"))
+
+def prices() -> tuple[float, float, float]:
+    """每次调用都读环境变量，避免模块导入早于 .env 加载。"""
+    return (
+        float(os.environ.get("ARK_PRICE_IN", "0.8")),
+        float(os.environ.get("ARK_PRICE_OUT", "3.2")),
+        float(os.environ.get("ARK_PRICE_CACHED", "0.016")),
+    )
 
 
 def cost_yuan(usage: Usage) -> float:
-    """按元/百万 token 折算单次调用成本。"""
+    """按元/百万 token 折算单次调用成本：输入、输出、缓存命中三档计价。"""
+    price_in, price_out, price_cached = prices()
     billed_in = max(usage.input_tokens - usage.cached_tokens, 0)
     return (
-        billed_in * PRICE_IN + usage.cached_tokens * PRICE_CACHED + usage.output_tokens * PRICE_OUT
+        billed_in * price_in + usage.cached_tokens * price_cached + usage.output_tokens * price_out
     ) / 1_000_000
 
 
