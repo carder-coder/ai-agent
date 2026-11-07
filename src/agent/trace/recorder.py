@@ -30,6 +30,8 @@ def cost_yuan(usage: Usage) -> float:
 
 
 class Tracer:
+    """将单次运行的事件追加为 JSONL，并维护本次累计用量与成本。"""
+
     def __init__(self, path: Path | None = None, run_id: str | None = None) -> None:
         self.run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         self.path = path or Path("traces") / f"{self.run_id}.jsonl"
@@ -40,12 +42,14 @@ class Tracer:
         self.event("run_start", run_id=self.run_id)
 
     def event(self, kind: str, **payload) -> dict:
+        """写入并立即 flush 单条事件，降低运行中断时丢失 trace 的风险。"""
         rec = {"ts": datetime.now().isoformat(timespec="milliseconds"), "kind": kind, **payload}
         self._fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         self._fh.flush()
         return rec
 
     def record_llm(self, step: int, model: str, response) -> None:
+        """累计真实 usage，并记录延迟、重试、工具名和当前费率下的成本估算。"""
         self.total_usage.add(response.usage)
         c = cost_yuan(response.usage)
         self.total_cost += c
@@ -68,6 +72,7 @@ class Tracer:
         )
 
     def record_tool(self, step: int, name: str, ok: bool, elapsed_ms: int, content: str) -> None:
+        """记录工具元数据和有限预览，避免把完整工具输出重复写入 trace。"""
         self.event(
             "tool",
             step=step,
@@ -78,6 +83,7 @@ class Tracer:
         )
 
     def close(self, **payload) -> None:
+        """写入汇总事件并关闭文件；调用方应在一次运行结束时调用。"""
         self.event(
             "run_end",
             total_cost_yuan=round(self.total_cost, 6),

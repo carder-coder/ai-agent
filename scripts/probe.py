@@ -41,11 +41,13 @@ ADD_TOOL = [
 
 
 def show(name: str, ok: bool, detail: str) -> bool:
+    """统一输出单项探测结果，并返回状态供 main 汇总退出码。"""
     print(f"[{'PASS' if ok else 'FAIL'}] {name}  {detail}")
     return ok
 
 
 def case_stream() -> bool:
+    """验证三次真实流式请求的首字节、文本、结束原因和 usage。"""
     client = DoubaoClient()
     ttfts: list[int] = []
     last = None
@@ -78,6 +80,7 @@ def case_stream() -> bool:
 
 
 def case_tools() -> bool:
+    """验证供应商返回的工具调用经过适配层后仍可正确解析。"""
     client = DoubaoClient()
     resp = client.complete(
         [Message(role="user", content="用 add 工具算 17 加 25。")], tools=ADD_TOOL
@@ -98,6 +101,7 @@ def case_tools() -> bool:
 
 
 def case_unreachable() -> bool:
+    """确认不可达地址会按预期快速失败，而不是卡住或重试。"""
     bad = OpenAI(api_key="placeholder", base_url="http://127.0.0.1:9/v1", timeout=2, max_retries=0)
     t0 = time.perf_counter()
     try:
@@ -148,6 +152,7 @@ class _StubHandler(BaseHTTPRequestHandler):
 
 
 def case_backoff() -> bool:
+    """用本地 HTTP 桩返回两次 429，验证实际客户端退避后能成功恢复。"""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _StubHandler)
     port = server.server_address[1]
     th = threading.Thread(target=server.serve_forever, daemon=True)
@@ -179,6 +184,7 @@ def case_backoff() -> bool:
 
 
 def main() -> int:
+    """选择并执行探测用例；缺少密钥时仅阻止需要真实模型的用例。"""
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--case",

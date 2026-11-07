@@ -13,6 +13,7 @@ FINISH_TOOL = "finish"
 
 
 def build_registry(root: Path) -> ToolRegistry:
+    """集中装配模型可调用的工具，使 CLI 和测试使用相同定义。"""
     reg = ToolRegistry(root=root.resolve())
 
     reg.register(

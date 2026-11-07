@@ -9,6 +9,8 @@ from .types import LLMResponse, Message, ToolCall, Usage
 
 
 class FakeClient:
+    """可脚本化的离线客户端；用于验证循环控制流，不模拟真实模型质量。"""
+
     name = "fake"
     model = "fake-scripted"
 
@@ -22,6 +24,7 @@ class FakeClient:
         ]
 
     def complete(self, messages: list[Message], tools: list[dict] | None = None) -> LLMResponse:
+        """按脚本顺序返回工具调用，脚本耗尽后返回无工具调用的空响应。"""
         time.sleep(0.02)
         calls = self.script[self.step] if self.step < len(self.script) else []
         self.step += 1

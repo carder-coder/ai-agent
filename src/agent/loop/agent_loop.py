@@ -27,6 +27,8 @@ REPEAT_LIMIT = 3
 
 @dataclass
 class RunResult:
+    """一次 agent 运行的结论、停止原因和累计成本信息。"""
+
     answer: str
     steps: int
     stop_reason: str
@@ -42,6 +44,7 @@ def run(
     tracer: Tracer,
     max_steps: int = MAX_STEPS_DEFAULT,
 ) -> RunResult:
+    """运行最多 max_steps 轮的工具循环，并在每次模型/工具交互时写 trace。"""
     messages: list[Message] = [
         Message(role="system", content=SYSTEM_PROMPT),
         Message(role="user", content=task),
@@ -53,6 +56,7 @@ def run(
     stop_reason = "max_steps"
 
     for step in range(1, max_steps + 1):
+        # 每轮先问模型；上游错误明确终止本次运行，不伪装成正常答案。
         try:
             resp = client.complete(messages, tools=schemas)
         except ProviderError as exc:
@@ -65,12 +69,14 @@ def run(
         messages.append(resp.message)
 
         if not resp.message.tool_calls:
+            # 没有工具调用代表模型直接给出文本结论，但不等同于显式 finish。
             answer = resp.message.content or ""
             stop_reason = "no_tool_call"
             break
 
         for call in resp.message.tool_calls:
             if call.name == FINISH_TOOL:
+                # finish 是协议级控制信号，不作为普通工具继续回填给模型。
                 try:
                     answer = json.loads(call.arguments).get("summary", "")
                 except json.JSONDecodeError:
@@ -81,6 +87,7 @@ def run(
                 break
 
             key = (call.name, call.arguments)
+            # 只比较相邻调用，避免模型短暂换过工具后仍被误判为重复循环。
             repeats = repeats + 1 if key == last_key else 1
             last_key = key
             if repeats >= REPEAT_LIMIT:
@@ -100,6 +107,7 @@ def run(
                 )
             )
 
+        # 达到循环保护条件或收到 finish 后，跳出外层模型调用循环。
         if stop_reason in {"finished", "no_new_info"}:
             break
     else:

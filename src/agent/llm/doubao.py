@@ -54,6 +54,7 @@ class DoubaoClient:
         """限流按 1、2、4 秒退避重试；超时与其他错误不重试，直接抛。"""
         self.last_attempts = 0
         self.last_retry_delays = []
+        # 只有明确的限流异常会重试；其他错误交给调用方分类处理，避免重复执行不确定请求。
         for attempt in range(1, self.max_retries + 2):
             self.last_attempts = attempt
             try:
@@ -69,6 +70,7 @@ class DoubaoClient:
     def _stream_once(
         self, messages: list[Message], tools: list[dict] | None, attempt: int
     ) -> LLMResponse:
+        """读取完整流并按 tool-call index 合并分片，最后生成稳定的内部响应对象。"""
         t0 = time.perf_counter()
         first_byte_ms: int | None = None
         text_parts: list[str] = []
@@ -85,6 +87,7 @@ class DoubaoClient:
                 stream_options={"include_usage": True},
             )
             for chunk in stream:
+                # 部分流的最后一个 chunk 只携带 usage，没有 choices，不能当作首字节或内容。
                 if first_byte_ms is None and chunk.choices:
                     first_byte_ms = int((time.perf_counter() - t0) * 1000)
                 if getattr(chunk, "usage", None):
@@ -104,6 +107,7 @@ class DoubaoClient:
                 if delta.content:
                     text_parts.append(delta.content)
                 for frag in delta.tool_calls or []:
+                    # 同一 index 的名称、ID、参数会分多个 chunk 到达，分别累积后再组装。
                     slot = calls.setdefault(frag.index, {"id": "", "name": "", "args": []})
                     if frag.id:
                         slot["id"] = frag.id

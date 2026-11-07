@@ -1,4 +1,4 @@
-"""run_shell：命令白名单 + 超时 + shell=False，危险子命令直接拒绝。"""
+"""run_shell：命令白名单 + 超时 + shell=False，降低误操作风险；不是操作系统级安全沙箱。"""
 
 from __future__ import annotations
 
@@ -34,6 +34,8 @@ class RunShellArgs(BaseModel):
 
 
 def make_run_shell(root: Path):
+    """构造工作目录固定在仓库根目录的命令执行工具。"""
+
     def run_shell(args: RunShellArgs) -> str:
         try:
             argv = shlex.split(args.command, posix=True)
@@ -42,6 +44,7 @@ def make_run_shell(root: Path):
         if not argv:
             return "命令为空"
         bin_name = Path(argv[0]).name.lower().removesuffix(".exe")
+        # 先拒绝已知危险入口，再检查允许列表；此白名单不能约束解释器内部的任意代码。
         if bin_name in DENIED_BINS:
             raise ToolDenied(f"{bin_name} 属于危险命令，永久禁止")
         if bin_name not in ALLOWED_BINS:
@@ -49,6 +52,7 @@ def make_run_shell(root: Path):
         if bin_name == "git" and len(argv) > 1 and argv[1] in DENIED_GIT:
             raise ToolDenied(f"git {argv[1]} 会改动远端或历史，需要人工确认")
         try:
+            # 不经 shell 解析可阻止管道、重定向等 shell 语法，但子进程权限仍与当前用户相同。
             proc = subprocess.run(
                 argv,
                 cwd=str(root),

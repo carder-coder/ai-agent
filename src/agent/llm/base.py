@@ -8,6 +8,8 @@ from .types import LLMResponse, Message
 
 
 class LLMClient(Protocol):
+    """循环依赖的最小模型接口；具体供应商只需实现这些属性和 complete。"""
+
     name: str
     model: str
 

@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 def load_dotenv(start: Path) -> Path | None:
-    """从当前目录向上找 .env，只补缺失的环境变量。"""
+    """从 start 向父目录寻找首个 .env；只补缺失变量，不覆盖进程环境。"""
     for folder in [start, *start.parents]:
         f = folder / ".env"
         if f.is_file():
@@ -24,6 +24,7 @@ def load_dotenv(start: Path) -> Path | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """解析 CLI 参数、装配 provider 和工具，执行一次任务并返回进程退出码。"""
     parser = argparse.ArgumentParser(prog="agent", description="A1 最小闭环命令行")
     parser.add_argument("--task", required=True, help="任务描述")
     parser.add_argument("--max-steps", type=int, default=int(os.environ.get("AGENT_MAX_STEPS", 12)))
@@ -33,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = Path(args.root or os.environ.get("AGENT_PROJECT_ROOT") or Path.cwd()).resolve()
+    # 先加载仓库配置，再初始化 provider，确保 ARK_* 配置在构造客户端时可见。
     load_dotenv(root)
 
     from ..llm import DoubaoClient, FakeClient, ProviderError

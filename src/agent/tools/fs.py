@@ -34,6 +34,7 @@ class SearchFilesArgs(BaseModel):
 
 
 def _resolve(root: Path, rel: str) -> Path:
+    """解析相对路径并拒绝逃出仓库根目录的路径（含 .. 与符号链接）。"""
     p = (root / rel).resolve()
     if root.resolve() not in p.parents and p != root.resolve():
         raise ToolDenied(f"仓库之外的路径：{rel}")
@@ -41,6 +42,7 @@ def _resolve(root: Path, rel: str) -> Path:
 
 
 def make_read_file(root: Path):
+    """构造绑定仓库根目录的读取工具，避免每次调用重复传 root。"""
     def read_file(args: ReadFileArgs) -> str:
         f = _resolve(root, args.path)
         if not f.is_file():
@@ -58,6 +60,7 @@ def make_read_file(root: Path):
 
 
 def make_search_files(root: Path):
+    """构造仓库搜索工具；返回列表受 limit 限制，但命中总数始终扫完整个范围。"""
     def search_files(args: SearchFilesArgs) -> str:
         try:
             rx = re.compile(args.pattern)
@@ -67,6 +70,7 @@ def make_search_files(root: Path):
         total = 0
         scanned = 0
         for path in sorted(root.rglob(args.glob)):
+            # 跳过运行产物和二进制，防止污染统计或把不可读内容当文本搜索。
             if any(part in SKIP_DIRS for part in path.parts) or not path.is_file():
                 continue
             if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".zip", ".pdf", ".docx"}:
@@ -78,6 +82,7 @@ def make_search_files(root: Path):
             scanned += 1
             for no, line in enumerate(text.splitlines(), 1):
                 if rx.search(line):
+                    # total 统计全量命中，hits 只负责保存展示上限内的明细。
                     total += 1
                     if len(hits) < args.limit:
                         rel = path.relative_to(root).as_posix()
