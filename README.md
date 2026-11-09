@@ -25,16 +25,19 @@ copy .env.example .env             # 填入 ARK_API_KEY、ARK_MODEL
 uv run python scripts/probe.py                                  # 连通性四项自检
 uv run python -m agent.cli --task "统计本仓库 TODO 与 FIXME 数量并列出前十条" --max-steps 12
 uv run python -m agent.cli --task "离线冒烟" --provider fake     # 无密钥时验证循环
+uv run python -m agent.cli --resume traces\<run_id>.jsonl --max-steps 12 # 从中断处继续
 uv run pytest -q                                                # 单测
 uv run ruff check .                                             # 静态检查
 uv run python scripts/replay.py --trace traces\<run_id>.jsonl  # 核对单次 trace
-uv run python scripts/press_429.py                              # 8 并发、每路 20 次真实请求
+uv run python scripts/press_429.py --model <mini-model-id> --concurrency 8 --rounds 20
 ```
 
 trace 落在 `traces/<run_id>.jsonl`，每行一个事件（llm / tool / finish / run_end），
-`run_end` 带本次总 token 与成本估算。
+`run_end` 带本次总 token 与成本估算。每次模型响应和工具执行后会把消息、步数与累计用量
+保存到同名 `.state.json`；Ctrl+C 后可传 trace 或 state 路径恢复，已完成的工具调用不会重放。
 `--prompt-variant concise` 可切换精简系统提示，与默认 `detailed` 做同任务对照。
-`press_429.py` 会实际发送最多 160 次模型请求并产生 API 费用；仅在需要验证真实限流时运行。
+`press_429.py` 支持 `--model`、`--concurrency`、`--rounds`、`--endpoint`，默认 8 并发、每路 20 次；
+它会真实发送最多 160 次模型请求并产生 API 费用。验证限流时优先指定低配额模型，仅在需要时运行。
 
 ## 当前阶段
 
@@ -43,9 +46,9 @@ trace 落在 `traces/<run_id>.jsonl`，每行一个事件（llm / tool / finish 
 ## 已知问题
 
 - 工具只读，写文件类工具留到第 2 周
-- 单次任务不做多轮记忆，上下文每次重开
+- 新任务默认不跨任务记忆；显式 `--resume` 可从本地断点恢复同一任务
 - trace 未做脱敏与轮转，只适合本地调试
-- 真实 429 退避已有本地 HTTP 桩单测；8 并发 × 20 请求的真实压测未触发 429（退出码 3），尚未验证服务端限流下的实际退避
+- 真实 429 退避由本地 HTTP 桩验证（两次等待合计约 3 秒）；真实压测此前 8 并发 × 20 请求未触发 429（退出码 3），没有配置 `ARK_MODEL_MINI` 时不对默认模型重复加压
 - trace 重放可核对历史用量与成本；旧 trace 没有工具参数，新 trace 才记录参数
 - run_shell 输出上限 4000 字符，超出会标注"已截断"，长输出场景需自己缩小范围
 - 运行产物放 `out/`，trace 放 `traces/`，两者都已忽略且不被 search_files 扫描
