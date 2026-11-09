@@ -1,0 +1,12 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+  "python.analysis.autoImportCompletions": true,
+  "python.analysis.indexing": true,
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}\\src"
+  ],
+  "python.analysis.typeCheckingMode": "basic",
+  "ruff.lint.enable": true,
+  "editor.hover.enabled": true,
+  "editor.multiCursorModifier": "alt"
+}
