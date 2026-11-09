@@ -20,14 +20,15 @@
 - 现状是 llm 事件没有消息快照，必须先落状态再谈恢复；恢复后不得重发已完成的工具调用。
 - 完成标志：第 3 步中断后 `--resume` 能走完，出现 `resumed_from` 字段，相同工具同参数不重复调用，合并后总步数不超过 12。
 - 详细任务单见 [2026-11-09-day3.md](../experiments/2026-11-09-day3.md)，本日还一并处理重放输出顺序、工作区未入库项与 429 的如实收口。
+- **执行结果**：`--resume` 与 `traces/<run_id>.state.json` 已落地，重放输出顺序修正、`status` 干净、单测 20 条；429 未复测（`ARK_MODEL_MINI` 为空），恢复只在 fake provider 上验证，提交 `799be60`、`2354acf`。
 
-## Day 4（11-10，2 小时）：三种故障可读
+## Day 4（11-10，2 小时）：故障路径补齐与覆盖率
 
-- 断网：把 `ARK_BASE_URL` 指向不可达地址，确认抛 `APITimeoutError` 并写进 trace 的 `provider_error` 事件。
-- 上游超时：把超时降到 1 秒，确认 429 之外的状态码也走同一条错误路径。
-- 工具报错：让 `read_file` 读一个不存在的路径，确认 observation 里回填错误文本而不是抛堆栈。
-- 补 `tests/test_loop.py`：三条故障各一条断言；需要覆盖率时先 `python -m uv add --dev pytest-cov`。
-- 完成标志：三种故障各有一段可读的失败原因；循环分支覆盖率不低于 70%（`pytest --cov=agent.loop`）。
+- 补四条分支断言：`provider_error`、工具失败回填 `ERROR: `、`loop_guard` 连续三次、`no_tool_call`。单测从 20 条补到 24 条以上。
+- 三条真实/半真实演练：不可达上游、`httpx.MockTransport` 造 `ReadTimeout` 验超时映射、读不存在路径看 `ok=False`。
+- 引入 `pytest-cov`，`agent.loop` 行覆盖率不低于 70%；顺手订正 `.env.example` 里仍是 6 / 30 / 1.2 的旧价目。
+- 完成标志：`pytest --cov=agent` 报告里 `agent/loop` 不低于 70%，四条断言能报出具体字段。
+- 详细任务单见 [2026-11-10-day4.md](../experiments/2026-11-10-day4.md)。
 
 ## Day 5（11-11，1 小时）：换机复现
 
