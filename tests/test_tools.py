@@ -49,6 +49,15 @@ def test_read_file_rejects_too_many_lines(repo: Path) -> None:
     assert "参数校验失败" in out.content
 
 
+def test_read_file_missing_path_is_reported_as_tool_failure(repo: Path) -> None:
+    reg = build_registry(repo)
+    out = reg.invoke("read_file", '{"path": "docs/not-exist.md"}')
+
+    assert not out.ok, "读取不存在的文件必须作为工具失败"
+    assert out.content.startswith("执行失败：FileNotFoundError")
+    assert "文件不存在：docs/not-exist.md" in out.content
+
+
 def test_search_files_counts(repo: Path) -> None:
     reg = build_registry(repo)
     out = reg.invoke("search_files", '{"pattern": "TODO|FIXME", "glob": "*.py", "limit": 10}')

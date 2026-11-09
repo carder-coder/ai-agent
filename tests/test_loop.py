@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 
 from agent.cli.main import main
-from agent.llm import FakeClient, ToolCall
+from agent.llm import FakeClient, LLMResponse, Message, ProviderTimeout, ToolCall
 from agent.loop import RunCheckpoint, run
-from agent.tools import build_registry
+from agent.tools import ToolRegistry, build_registry
 from agent.trace import Tracer
 
 
@@ -48,6 +48,85 @@ def test_loop_stops_on_max_steps(tmp_path: Path) -> None:
     tracer.close(stop_reason=result.stop_reason)
     assert result.stop_reason == "no_new_info"
     assert result.steps == 3
+    loop_guard = next(
+        json.loads(line)
+        for line in tracer.path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["kind"] == "loop_guard"
+    )
+    assert loop_guard["repeats"] == 3, "loop_guard 必须记录实际重复次数"
+
+
+def test_loop_records_provider_error(tmp_path: Path) -> None:
+    class TimeoutClient(FakeClient):
+        def complete(self, messages, tools=None, max_tokens=None):
+            raise ProviderTimeout("上游超时：测试")
+
+    tracer = Tracer(path=tmp_path / "traces" / "provider-error.jsonl")
+    result = run("测试上游故障", TimeoutClient(), build_registry(tmp_path), tracer)
+    tracer.close(stop_reason=result.stop_reason)
+
+    events = [json.loads(line) for line in tracer.path.read_text(encoding="utf-8").splitlines()]
+    assert result.stop_reason == "provider_error", "上游错误必须设置正确 stop_reason"
+    assert result.answer.startswith("上游不可用："), "用户可见答案需说明上游不可用"
+    assert any(event["kind"] == "provider_error" for event in events), (
+        "trace 必须记录 provider_error 事件"
+    )
+
+
+def test_tool_failure_is_returned_to_model_and_loop_continues(tmp_path: Path) -> None:
+    from pydantic import BaseModel
+
+    class Args(BaseModel):
+        value: str
+
+    class CapturingClient(FakeClient):
+        def __init__(self, script):
+            super().__init__(script=script)
+            self.received_messages = []
+
+        def complete(self, messages, tools=None, max_tokens=None):
+            self.received_messages.append(list(messages))
+            return super().complete(messages, tools, max_tokens)
+
+    registry = ToolRegistry(root=tmp_path)
+
+    def fail(_args: Args) -> str:
+        raise RuntimeError("预期测试异常")
+
+    registry.register("fail", "总是失败的测试工具", Args)(fail)
+    client = CapturingClient(
+        script=[
+            [ToolCall("fail-1", "fail", '{"value": "test"}')],
+            [ToolCall("finish-1", "finish", '{"summary": "已处理失败"}')],
+        ]
+    )
+    tracer = Tracer(path=tmp_path / "traces" / "tool-error.jsonl")
+    result = run("测试工具失败回填", client, registry, tracer)
+    tracer.close(stop_reason=result.stop_reason)
+
+    events = [json.loads(line) for line in tracer.path.read_text(encoding="utf-8").splitlines()]
+    tool_event = next(event for event in events if event["kind"] == "tool")
+    feedback = next(message for message in client.received_messages[1] if message.role == "tool")
+    assert tool_event["ok"] is False, "失败工具的 trace 必须标记 ok=False"
+    assert feedback.content.startswith("ERROR: "), "失败 observation 必须带 ERROR 前缀"
+    assert "预期测试异常" in feedback.content
+    assert result.stop_reason == "finished", "工具失败后循环仍应继续并能完成"
+    assert result.steps == 2
+
+
+def test_loop_finishes_with_plain_text_response(tmp_path: Path) -> None:
+    class TextClient(FakeClient):
+        def complete(self, messages, tools=None, max_tokens=None):
+            return LLMResponse(
+                message=Message(role="assistant", content="这是直接回答"),
+            )
+
+    tracer = Tracer(path=tmp_path / "traces" / "plain-text.jsonl")
+    result = run("直接回答", TextClient(), build_registry(tmp_path), tracer)
+    tracer.close(stop_reason=result.stop_reason)
+
+    assert result.stop_reason == "no_tool_call", "无工具调用的响应应走 no_tool_call 分支"
+    assert result.answer == "这是直接回答"
 
 
 @pytest.mark.parametrize("resume_with_state_file", [False, True])

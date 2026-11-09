@@ -47,7 +47,7 @@ def make_read_file(root: Path):
     def read_file(args: ReadFileArgs) -> str:
         f = _resolve(root, args.path)
         if not f.is_file():
-            return f"文件不存在：{args.path}"
+            raise FileNotFoundError(f"文件不存在：{args.path}")
         lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
         chunk = lines[args.offset : args.offset + args.max_lines]
         body = "\n".join(f"{i + args.offset + 1:>4}| {ln}" for i, ln in enumerate(chunk))

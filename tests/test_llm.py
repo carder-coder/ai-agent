@@ -8,7 +8,10 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
-from agent.llm import DoubaoClient, Message
+import httpx
+from openai import OpenAI
+
+from agent.llm import DoubaoClient, Message, ProviderTimeout
 
 
 def _delta(content=None, tool_calls=None, finish=None):
@@ -125,3 +128,34 @@ def test_rate_limit_retries_against_local_http_server() -> None:
     assert response.attempts == 3, "响应 attempts 必须包含所有尝试"
     assert client.last_retry_delays == [1.0, 2.0], "429 退避间隔必须依次为 1 秒和 2 秒"
     assert 2.8 <= elapsed_s <= 3.5, f"两次退避总耗时应约 3 秒，实际 {elapsed_s:.2f} 秒"
+
+
+def test_read_timeout_is_mapped_to_provider_timeout() -> None:
+    def timeout_request(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("mock 上游响应超时")
+
+    transport = httpx.MockTransport(timeout_request)
+    http_client = httpx.Client(transport=transport)
+    client = DoubaoClient(
+        model="stub",
+        api_key="stub",
+        base_url="http://mock.local/v1",
+        max_retries=0,
+    )
+    client._client.close()
+    client._client = OpenAI(
+        api_key="stub",
+        base_url="http://mock.local/v1",
+        http_client=http_client,
+        max_retries=0,
+    )
+    try:
+        try:
+            client.complete([Message(role="user", content="ping")])
+        except ProviderTimeout as exc:
+            assert str(exc).startswith("上游超时："), "ReadTimeout 应映射为 ProviderTimeout"
+        else:
+            raise AssertionError("ReadTimeout 必须映射为 ProviderTimeout")
+    finally:
+        client._client.close()
+        http_client.close()
