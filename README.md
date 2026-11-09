@@ -27,6 +27,7 @@ uv run python -m agent.cli --task "统计本仓库 TODO 与 FIXME 数量并列�
 uv run python -m agent.cli --task "离线冒烟" --provider fake     # 无密钥时验证循环
 uv run python -m agent.cli --resume traces\<run_id>.jsonl --max-steps 12 # 从中断处继续
 uv run pytest -q                                                # 单测
+uv run pytest --cov=agent --cov-report=term-missing -q           # 单测与覆盖率
 uv run ruff check .                                             # 静态检查
 uv run python scripts/replay.py --trace traces\<run_id>.jsonl  # 核对单次 trace
 uv run python scripts/press_429.py --model <mini-model-id> --concurrency 8 --rounds 20
