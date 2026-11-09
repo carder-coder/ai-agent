@@ -27,10 +27,14 @@ uv run python -m agent.cli --task "统计本仓库 TODO 与 FIXME 数量并列�
 uv run python -m agent.cli --task "离线冒烟" --provider fake     # 无密钥时验证循环
 uv run pytest -q                                                # 单测
 uv run ruff check .                                             # 静态检查
+uv run python scripts/replay.py --trace traces\<run_id>.jsonl  # 核对单次 trace
+uv run python scripts/press_429.py                              # 8 并发、每路 20 次真实请求
 ```
 
 trace 落在 `traces/<run_id>.jsonl`，每行一个事件（llm / tool / finish / run_end），
 `run_end` 带本次总 token 与成本估算。
+`--prompt-variant concise` 可切换精简系统提示，与默认 `detailed` 做同任务对照。
+`press_429.py` 会实际发送最多 160 次模型请求并产生 API 费用；仅在需要验证真实限流时运行。
 
 ## 当前阶段
 
@@ -41,8 +45,8 @@ trace 落在 `traces/<run_id>.jsonl`，每行一个事件（llm / tool / finish 
 - 工具只读，写文件类工具留到第 2 周
 - 单次任务不做多轮记忆，上下文每次重开
 - trace 未做脱敏与轮转，只适合本地调试
-- 真实 429 退避只在本地桩上验证过，未经真实限流压测
-- 统计类任务当前 7 步收尾，高于表23 的 3 到 6 步目标
+- 真实 429 退避已有本地 HTTP 桩单测；8 并发 × 20 请求的真实压测未触发 429（退出码 3），尚未验证服务端限流下的实际退避
+- trace 重放可核对历史用量与成本；旧 trace 没有工具参数，新 trace 才记录参数
 - run_shell 输出上限 4000 字符，超出会标注"已截断"，长输出场景需自己缩小范围
 - 运行产物放 `out/`，trace 放 `traces/`，两者都已忽略且不被 search_files 扫描
 
