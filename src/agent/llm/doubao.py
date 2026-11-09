@@ -50,7 +50,12 @@ class DoubaoClient:
         self.last_attempts = 0
         self.last_retry_delays: list[float] = []
 
-    def complete(self, messages: list[Message], tools: list[dict] | None = None) -> LLMResponse:
+    def complete(
+        self,
+        messages: list[Message],
+        tools: list[dict] | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
         """限流按 1、2、4 秒退避重试；超时与其他错误不重试，直接抛。"""
         self.last_attempts = 0
         self.last_retry_delays = []
@@ -58,7 +63,7 @@ class DoubaoClient:
         for attempt in range(1, self.max_retries + 2):
             self.last_attempts = attempt
             try:
-                return self._stream_once(messages, tools, attempt)
+                return self._stream_once(messages, tools, attempt, max_tokens)
             except ProviderRateLimited:
                 if attempt > self.max_retries:
                     raise
@@ -68,7 +73,11 @@ class DoubaoClient:
         raise ProviderError("退避重试用尽")
 
     def _stream_once(
-        self, messages: list[Message], tools: list[dict] | None, attempt: int
+        self,
+        messages: list[Message],
+        tools: list[dict] | None,
+        attempt: int,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         """读取完整流并按 tool-call index 合并分片，最后生成稳定的内部响应对象。"""
         t0 = time.perf_counter()
@@ -83,6 +92,7 @@ class DoubaoClient:
                 model=self.model,
                 messages=[m.to_openai() for m in messages],
                 tools=tools or None,
+                max_tokens=max_tokens,
                 stream=True,
                 stream_options={"include_usage": True},
             )

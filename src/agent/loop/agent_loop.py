@@ -10,15 +10,21 @@ from ..tools import FINISH_TOOL, ToolRegistry
 from ..trace import Tracer, cost_yuan
 
 SYSTEM_PROMPT = (
-    "你是一个只读的仓库分析智能体。可用工具：read_file、search_files、run_shell、finish。"
-    "规则："
-    "一，每步只调一个工具，不要一次并发多个；同一个工具同样的参数不要重复调；"
-    "二，统计类任务先定口径（按命中的行数），全篇只用一个口径，总数必须等于明细条数；"
-    "三，工具结果出现“已截断”或“只列前 N 条”时，必须缩小范围重取，不能拿部分结果当总数；"
-    "四，优先用 search_files 一次拿到命中，不要用 run_shell 反复试探；"
-    "五，run_shell 在 Windows 上只接受单条命令，不支持管道、重定向、分号、&&、通配符展开，"
-    "需要计数时写成 python -c 一行；"
-    "六，信息够了必须调用 finish，结论里写清数字、口径和依据文件。"
+    "你是只读仓库分析智能体，只用 read_file、search_files、run_shell、finish。\n"
+    "1. 每步一个工具，禁止并发、重复相同参数。\n"
+    "2. 统计按匹配行数，遵循用户扫描范围。多个关键词分别用 summary=true 汇总，并集用组合正则；"
+    "summary全量总数为准，只在用户要明细时以limit取明细，禁止再用read_file/run_shell复核。\n"
+    "3. “已截断”/“只列前 N 条”必须缩小范围重查，不得据此报告总数。\n"
+    "4. 优先 search_files，少用 run_shell。\n"
+    "5. Windows run_shell仅接受单条命令，不能用管道、重定向、分号、&&、通配符展开；"
+    "计数用 python -c。\n"
+    "6. 信息足够立即 finish，说明数字、口径和依据；不确定需明说。"
+)
+
+CONCISE_SYSTEM_PROMPT = (
+    "你是仓库分析助手，每步只调用一个工具。统计按行计数且遵循同一口径；用 search_files "
+    "summary=true 查总数，用户要明细才设 limit。汇总已扫全范围，不必重复核对。信息足够立即 "
+    "finish，说明数字、口径与依据。"
 )
 
 MAX_STEPS_DEFAULT = 12
@@ -43,10 +49,11 @@ def run(
     registry: ToolRegistry,
     tracer: Tracer,
     max_steps: int = MAX_STEPS_DEFAULT,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> RunResult:
     """运行最多 max_steps 轮的工具循环，并在每次模型/工具交互时写 trace。"""
     messages: list[Message] = [
-        Message(role="system", content=SYSTEM_PROMPT),
+        Message(role="system", content=system_prompt),
         Message(role="user", content=task),
     ]
     schemas = registry.schemas()
@@ -83,7 +90,7 @@ def run(
                     answer = call.arguments
                 stop_reason = "finished"
                 tracer.event("finish", step=step, answer=answer)
-                tracer.record_tool(step, call.name, True, 0, answer)
+                tracer.record_tool(step, call.name, True, 0, answer, call.arguments)
                 break
 
             key = (call.name, call.arguments)
@@ -97,7 +104,9 @@ def run(
                 break
 
             result = registry.invoke(call.name, call.arguments)
-            tracer.record_tool(step, call.name, result.ok, result.elapsed_ms, result.content)
+            tracer.record_tool(
+                step, call.name, result.ok, result.elapsed_ms, result.content, call.arguments
+            )
             messages.append(
                 Message(
                     role="tool",

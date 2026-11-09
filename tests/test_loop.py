@@ -24,8 +24,14 @@ def test_loop_finishes(tmp_path: Path) -> None:
         json.loads(line)["kind"]
         for line in tracer.path.read_text(encoding="utf-8").splitlines()
     ]
+    tool_events = [
+        json.loads(line)
+        for line in tracer.path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["kind"] == "tool"
+    ]
     assert kinds.count("llm") == 2
     assert "tool" in kinds
+    assert tool_events[0]["arguments"] == '{"pattern": "TODO|FIXME", "glob": "*.py"}'
     assert kinds[-1] == "run_end"
 
 

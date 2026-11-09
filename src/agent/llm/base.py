@@ -17,4 +17,5 @@ class LLMClient(Protocol):
         self,
         messages: list[Message],
         tools: list[dict] | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResponse: ...

@@ -23,7 +23,12 @@ class FakeClient:
             [ToolCall("call_2", "finish", second)],
         ]
 
-    def complete(self, messages: list[Message], tools: list[dict] | None = None) -> LLMResponse:
+    def complete(
+        self,
+        messages: list[Message],
+        tools: list[dict] | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
         """按脚本顺序返回工具调用，脚本耗尽后返回无工具调用的空响应。"""
         time.sleep(0.02)
         calls = self.script[self.step] if self.step < len(self.script) else []

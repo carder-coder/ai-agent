@@ -29,6 +29,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--task", required=True, help="任务描述")
     parser.add_argument("--max-steps", type=int, default=int(os.environ.get("AGENT_MAX_STEPS", 12)))
     parser.add_argument("--provider", choices=["doubao", "fake"], default="doubao")
+    parser.add_argument(
+        "--prompt-variant",
+        choices=["detailed", "concise"],
+        default="detailed",
+        help="系统提示版本，用于同任务对照",
+    )
     parser.add_argument("--root", default="", help="工具可访问的仓库根目录，默认当前目录")
     parser.add_argument("--quiet", action="store_true", help="只打印结论")
     args = parser.parse_args(argv)
@@ -39,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from ..llm import DoubaoClient, FakeClient, ProviderError
     from ..loop import run
+    from ..loop.agent_loop import CONCISE_SYSTEM_PROMPT, SYSTEM_PROMPT
     from ..tools import build_registry
     from ..trace import Tracer
 
@@ -53,7 +60,15 @@ def main(argv: list[str] | None = None) -> int:
 
     registry = build_registry(root)
     tracer = Tracer()
-    result = run(args.task, client, registry, tracer, max_steps=args.max_steps)
+    prompt = CONCISE_SYSTEM_PROMPT if args.prompt_variant == "concise" else SYSTEM_PROMPT
+    result = run(
+        args.task,
+        client,
+        registry,
+        tracer,
+        max_steps=args.max_steps,
+        system_prompt=prompt,
+    )
     tracer.close(stop_reason=result.stop_reason, steps=result.steps)
 
     if not args.quiet:

@@ -71,12 +71,21 @@ class Tracer:
             tool_calls=[c2.name for c2 in response.message.tool_calls],
         )
 
-    def record_tool(self, step: int, name: str, ok: bool, elapsed_ms: int, content: str) -> None:
+    def record_tool(
+        self,
+        step: int,
+        name: str,
+        ok: bool,
+        elapsed_ms: int,
+        content: str,
+        arguments: str | None = None,
+    ) -> None:
         """记录工具元数据和有限预览，避免把完整工具输出重复写入 trace。"""
         self.event(
             "tool",
             step=step,
             name=name,
+            arguments=arguments,
             ok=ok,
             elapsed_ms=elapsed_ms,
             preview=content[:300],

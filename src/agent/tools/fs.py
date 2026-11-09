@@ -31,6 +31,7 @@ class SearchFilesArgs(BaseModel):
     pattern: str = Field(description="正则表达式，例如 TODO|FIXME")
     glob: str = Field(default="*", description="文件匹配模式，例如 *.py 或 **/*.md")
     limit: int = Field(default=20, ge=1, le=60, description="最多返回多少条命中")
+    summary: bool = Field(default=False, description="只返回每个文件的命中行数与总数，不返回上下文")
 
 
 def _resolve(root: Path, rel: str) -> Path:
@@ -67,6 +68,7 @@ def make_search_files(root: Path):
         except re.error as exc:
             return f"正则不合法：{exc}"
         hits: list[str] = []
+        file_counts: dict[str, int] = {}
         total = 0
         scanned = 0
         for path in sorted(root.rglob(args.glob)):
@@ -84,9 +86,16 @@ def make_search_files(root: Path):
                 if rx.search(line):
                     # total 统计全量命中，hits 只负责保存展示上限内的明细。
                     total += 1
-                    if len(hits) < args.limit:
-                        rel = path.relative_to(root).as_posix()
+                    rel = path.relative_to(root).as_posix()
+                    file_counts[rel] = file_counts.get(rel, 0) + 1
+                    if not args.summary and len(hits) < args.limit:
                         hits.append(f"{rel}:{no}: {line.strip()[:120]}")
+        if args.summary:
+            head = f"汇总：扫描 {scanned} 个文件，命中总数 {total} 行"
+            if not file_counts:
+                return head
+            details = "\n".join(f"{path}: {count} 行" for path, count in file_counts.items())
+            return f"{head}\n按文件计数：\n{details}"
         if not total:
             return f"扫描 {scanned} 个文件，没有命中「{args.pattern}」"
         head = f"扫描 {scanned} 个文件，命中 {total} 行"
