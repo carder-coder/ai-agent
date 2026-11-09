@@ -64,10 +64,12 @@ def replay(path: Path) -> int:
             print("步骤 字段缺失：step")
             continue
         associated_tools = tool_events.get(step, [])
-        tool_names = []
+        tool_names: list[str] = []
         for tool in associated_tools:
             name = _required(tool, "name", missing)
-            tool_names.append(str(name) if name is not None else "字段缺失：name")
+            name_text = str(name) if name is not None else "字段缺失：name"
+            if name_text not in tool_names:
+                tool_names.append(name_text)
         tool_name = ", ".join(tool_names) if tool_names else "无工具事件"
         usage = _required(llm, "usage", missing)
         if not isinstance(usage, dict):
@@ -76,22 +78,24 @@ def replay(path: Path) -> int:
         input_tokens = _required(usage, "in", missing)
         output_tokens = _required(usage, "out", missing)
         cost = _required(llm, "cost_yuan", missing)
-        for tool in associated_tools:
-            args = _required(tool, "arguments", missing)
-            if args is not None:
-                args = str(args).replace("\n", " ")
-                if len(args) > 80:
-                    args = args[:77] + "..."
-                print(
-                    f"  参数: {args} | 工具耗时: "
-                    f"{tool.get('elapsed_ms', '字段缺失：elapsed_ms')}ms"
-                )
         print(
             f"步骤 {step}: 工具={tool_name} | "
             f"token={input_tokens if input_tokens is not None else '字段缺失：in'}"
             f"/{output_tokens if output_tokens is not None else '字段缺失：out'} | "
             f"成本={cost if cost is not None else '字段缺失：cost_yuan'} 元"
         )
+        for tool in associated_tools:
+            args = _required(tool, "arguments", missing)
+            if args is None:
+                args_text = "参数缺失（旧 trace 未记录）"
+            else:
+                args_text = str(args).replace("\n", " ")
+                if len(args_text) > 80:
+                    args_text = args_text[:77] + "..."
+            print(
+                f"  参数: {args_text} | 工具耗时: "
+                f"{tool.get('elapsed_ms', '字段缺失：elapsed_ms')}ms"
+            )
 
     usage_total = _required(end, "usage", missing)
     if not isinstance(usage_total, dict):

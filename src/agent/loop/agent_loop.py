@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
-from ..llm import LLMClient, Message, ProviderError, Usage
+from ..llm import LLMClient, Message, ProviderError, ToolCall, Usage
 from ..tools import FINISH_TOOL, ToolRegistry
 from ..trace import Tracer, cost_yuan
 
@@ -43,6 +45,107 @@ class RunResult:
     trace_path: str = ""
 
 
+@dataclass
+class RunCheckpoint:
+    """可恢复循环所需的对话、累计计量和未完成工具调用。"""
+
+    run_id: str
+    trace_path: str
+    task: str
+    messages: list[Message]
+    step: int
+    next_step: int
+    pending_calls: list[ToolCall]
+    next_call_index: int
+    usage: Usage
+    total_cost_yuan: float
+    last_key: tuple[str, str] | None = None
+    repeats: int = 0
+    status: str = "in_progress"
+
+    @classmethod
+    def load(cls, path: Path) -> RunCheckpoint:
+        """读取并验证状态文件；损坏状态显式报错，不从空对话静默续跑。"""
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("version") != 1:
+                raise ValueError(f"不支持的断点版本：{data.get('version')}")
+            usage = Usage(**data["usage"])
+            messages = [
+                Message(
+                    role=item["role"],
+                    content=item.get("content"),
+                    tool_calls=[
+                        ToolCall(
+                            id=call["id"],
+                            name=call["function"]["name"],
+                            arguments=call["function"]["arguments"],
+                        )
+                        for call in item.get("tool_calls", [])
+                    ],
+                    tool_call_id=item.get("tool_call_id"),
+                    name=item.get("name"),
+                )
+                for item in data["messages"]
+            ]
+            pending_calls = [
+                ToolCall(**call) for call in data.get("pending_calls", [])
+            ]
+            last_key_data = data.get("last_key")
+            last_key = tuple(last_key_data) if last_key_data else None
+            checkpoint = cls(
+                run_id=data["run_id"],
+                trace_path=data["trace_path"],
+                task=data["task"],
+                messages=messages,
+                step=int(data["step"]),
+                next_step=int(data["next_step"]),
+                pending_calls=pending_calls,
+                next_call_index=int(data["next_call_index"]),
+                usage=usage,
+                total_cost_yuan=float(data["total_cost_yuan"]),
+                last_key=last_key,
+                repeats=int(data.get("repeats", 0)),
+                status=data.get("status", "in_progress"),
+            )
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"断点状态无效：{path}: {exc}") from exc
+        if checkpoint.next_call_index > len(checkpoint.pending_calls):
+            raise ValueError(f"断点状态无效：工具调用位置越界：{path}")
+        return checkpoint
+
+    def save(self, path: Path) -> None:
+        """原子替换状态文件，避免中断时留下半截 JSON。"""
+        data: dict[str, Any] = {
+            "version": 1,
+            "run_id": self.run_id,
+            "trace_path": self.trace_path,
+            "task": self.task,
+            "messages": [message.to_openai() for message in self.messages],
+            "step": self.step,
+            "next_step": self.next_step,
+            "pending_calls": [
+                {"id": call.id, "name": call.name, "arguments": call.arguments}
+                for call in self.pending_calls
+            ],
+            "next_call_index": self.next_call_index,
+            "usage": {
+                "input_tokens": self.usage.input_tokens,
+                "output_tokens": self.usage.output_tokens,
+                "total_tokens": self.usage.total_tokens,
+                "cached_tokens": self.usage.cached_tokens,
+            },
+            "total_cost_yuan": self.total_cost_yuan,
+            "last_key": list(self.last_key) if self.last_key else None,
+            "repeats": self.repeats,
+            "status": self.status,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(path)
+
+
 def run(
     task: str,
     client: LLMClient,
@@ -50,38 +153,76 @@ def run(
     tracer: Tracer,
     max_steps: int = MAX_STEPS_DEFAULT,
     system_prompt: str = SYSTEM_PROMPT,
+    checkpoint: RunCheckpoint | None = None,
 ) -> RunResult:
     """运行最多 max_steps 轮的工具循环，并在每次模型/工具交互时写 trace。"""
-    messages: list[Message] = [
+    messages = checkpoint.messages if checkpoint else [
         Message(role="system", content=system_prompt),
         Message(role="user", content=task),
     ]
     schemas = registry.schemas()
-    last_key: tuple[str, str] | None = None
-    repeats = 0
+    last_key = checkpoint.last_key if checkpoint else None
+    repeats = checkpoint.repeats if checkpoint else 0
+    pending_calls = checkpoint.pending_calls if checkpoint else []
+    next_call_index = checkpoint.next_call_index if checkpoint else 0
+    step = checkpoint.step if checkpoint else 0
+    next_step = checkpoint.next_step if checkpoint else 1
     answer = ""
     stop_reason = "max_steps"
+    checkpoint_path = tracer.path.with_suffix(".state.json")
 
-    for step in range(1, max_steps + 1):
-        # 每轮先问模型；上游错误明确终止本次运行，不伪装成正常答案。
-        try:
-            resp = client.complete(messages, tools=schemas)
-        except ProviderError as exc:
-            answer = f"上游不可用：{exc}"
-            stop_reason = "provider_error"
-            tracer.event("provider_error", step=step, error=str(exc))
-            break
+    def save_checkpoint(status: str = "in_progress") -> None:
+        state = RunCheckpoint(
+            run_id=tracer.run_id,
+            trace_path=str(tracer.path.resolve()),
+            task=task,
+            messages=messages,
+            step=step,
+            next_step=next_step,
+            pending_calls=pending_calls,
+            next_call_index=next_call_index,
+            usage=tracer.total_usage,
+            total_cost_yuan=tracer.total_cost,
+            last_key=last_key,
+            repeats=repeats,
+            status=status,
+        )
+        state.save(checkpoint_path)
 
-        tracer.record_llm(step, getattr(client, "model", "unknown"), resp)
-        messages.append(resp.message)
+    if checkpoint is None:
+        save_checkpoint()
 
-        if not resp.message.tool_calls:
-            # 没有工具调用代表模型直接给出文本结论，但不等同于显式 finish。
-            answer = resp.message.content or ""
-            stop_reason = "no_tool_call"
-            break
+    for current_step in range(next_step, max_steps + 1):
+        step = current_step
+        if not pending_calls:
+            # 请求开始前落点；此时中断可安全地重发尚未得到响应的模型请求。
+            next_step = step
+            save_checkpoint()
+            try:
+                resp = client.complete(messages, tools=schemas)
+            except ProviderError as exc:
+                answer = f"上游不可用：{exc}"
+                stop_reason = "provider_error"
+                tracer.event("provider_error", step=step, error=str(exc))
+                save_checkpoint(status=stop_reason)
+                break
 
-        for call in resp.message.tool_calls:
+            tracer.record_llm(step, getattr(client, "model", "unknown"), resp)
+            messages.append(resp.message)
+            pending_calls = list(resp.message.tool_calls)
+            next_call_index = 0
+            save_checkpoint()
+
+            if not pending_calls:
+                # 没有工具调用代表模型直接给出文本结论，但不等同于显式 finish。
+                answer = resp.message.content or ""
+                stop_reason = "no_tool_call"
+                next_step = step + 1
+                save_checkpoint(status=stop_reason)
+                break
+
+        for call_index in range(next_call_index, len(pending_calls)):
+            call = pending_calls[call_index]
             if call.name == FINISH_TOOL:
                 # finish 是协议级控制信号，不作为普通工具继续回填给模型。
                 try:
@@ -91,6 +232,10 @@ def run(
                 stop_reason = "finished"
                 tracer.event("finish", step=step, answer=answer)
                 tracer.record_tool(step, call.name, True, 0, answer, call.arguments)
+                pending_calls = []
+                next_call_index = 0
+                next_step = step + 1
+                save_checkpoint(status=stop_reason)
                 break
 
             key = (call.name, call.arguments)
@@ -101,6 +246,10 @@ def run(
                 answer = f"连续 {repeats} 次调用同一工具且参数未变，已停止以免空转"
                 stop_reason = "no_new_info"
                 tracer.event("loop_guard", step=step, tool=call.name, repeats=repeats)
+                pending_calls = []
+                next_call_index = 0
+                next_step = step + 1
+                save_checkpoint(status=stop_reason)
                 break
 
             result = registry.invoke(call.name, call.arguments)
@@ -115,12 +264,21 @@ def run(
                     content=("" if result.ok else "ERROR: ") + result.content,
                 )
             )
+            next_call_index = call_index + 1
+            save_checkpoint()
 
-        # 达到循环保护条件或收到 finish 后，跳出外层模型调用循环。
         if stop_reason in {"finished", "no_new_info"}:
             break
+        pending_calls = []
+        next_call_index = 0
+        next_step = step + 1
+        save_checkpoint()
     else:
         stop_reason = "max_steps"
+        save_checkpoint(status=stop_reason)
+
+    if next_step > max_steps and stop_reason == "max_steps":
+        step = max(step, max_steps)
 
     result_usage: Usage = tracer.total_usage
     return RunResult(

@@ -1,3 +1,3 @@
-from .agent_loop import RunResult, run
+from .agent_loop import RunCheckpoint, RunResult, run
 
-__all__ = ["RunResult", "run"]
+__all__ = ["RunCheckpoint", "RunResult", "run"]

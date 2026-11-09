@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
@@ -44,9 +45,8 @@ def test_tool_call_fragments_are_assembled(monkeypatch) -> None:
     assert resp.attempts == 1
 
 
-def test_rate_limit_retries_against_local_http_server(monkeypatch) -> None:
+def test_rate_limit_retries_against_local_http_server() -> None:
     attempts: list[int] = []
-    delays: list[float] = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
@@ -105,7 +105,6 @@ def test_rate_limit_retries_against_local_http_server(monkeypatch) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
-    monkeypatch.setattr("agent.llm.doubao.time.sleep", delays.append)
     client = DoubaoClient(
         model="stub",
         api_key="stub",
@@ -113,7 +112,9 @@ def test_rate_limit_retries_against_local_http_server(monkeypatch) -> None:
         max_retries=3,
     )
     try:
+        started = time.perf_counter()
         response = client.complete([Message(role="user", content="ping")])
+        elapsed_s = time.perf_counter() - started
     finally:
         client._client.close()
         server.shutdown()
@@ -122,4 +123,5 @@ def test_rate_limit_retries_against_local_http_server(monkeypatch) -> None:
 
     assert len(attempts) == 3, "本地桩应收到两次 429 和一次成功 SSE 请求"
     assert response.attempts == 3, "响应 attempts 必须包含所有尝试"
-    assert delays == [1.0, 2.0], "429 退避间隔必须依次为 1 秒和 2 秒"
+    assert client.last_retry_delays == [1.0, 2.0], "429 退避间隔必须依次为 1 秒和 2 秒"
+    assert 2.8 <= elapsed_s <= 3.5, f"两次退避总耗时应约 3 秒，实际 {elapsed_s:.2f} 秒"

@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent.llm import FakeClient
-from agent.loop import run
+import pytest
+
+from agent.cli.main import main
+from agent.llm import FakeClient, ToolCall
+from agent.loop import RunCheckpoint, run
 from agent.tools import build_registry
 from agent.trace import Tracer
 
@@ -36,8 +39,6 @@ def test_loop_finishes(tmp_path: Path) -> None:
 
 
 def test_loop_stops_on_max_steps(tmp_path: Path) -> None:
-    from agent.llm import ToolCall
-
     script = [
         [ToolCall(f"c{i}", "search_files", '{"pattern": "TODO", "glob": "*.py"}')]
         for i in range(5)
@@ -47,3 +48,94 @@ def test_loop_stops_on_max_steps(tmp_path: Path) -> None:
     tracer.close(stop_reason=result.stop_reason)
     assert result.stop_reason == "no_new_info"
     assert result.steps == 3
+
+
+@pytest.mark.parametrize("resume_with_state_file", [False, True])
+def test_loop_resumes_pending_tool_calls_without_replaying_completed_ones(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resume_with_state_file: bool,
+) -> None:
+    scripts = [
+        [ToolCall("c1", "search_files", '{"pattern": "TODO", "glob": "*.py"}')],
+        [ToolCall("c2", "search_files", '{"pattern": "FIXME", "glob": "*.py"}')],
+        [
+            ToolCall("c3a", "search_files", '{"pattern": "MATCH", "glob": "*.py"}'),
+            ToolCall("c3b", "search_files", '{"pattern": "OTHER", "glob": "*.py"}'),
+        ],
+    ]
+
+    class InterruptingClient(FakeClient):
+        def complete(self, messages, tools=None, max_tokens=None):
+            if self.step == len(scripts):
+                raise KeyboardInterrupt
+            return super().complete(messages, tools, max_tokens)
+
+    registry = build_registry(tmp_path)
+    original_invoke = registry.invoke
+    invoke_count = 0
+
+    def interrupt_before_fourth_tool(name: str, raw_args: str):
+        nonlocal invoke_count
+        invoke_count += 1
+        if invoke_count == 4:
+            raise KeyboardInterrupt
+        return original_invoke(name, raw_args)
+
+    monkeypatch.setattr(registry, "invoke", interrupt_before_fourth_tool)
+    trace_path = tmp_path / "traces" / "resume.jsonl"
+    tracer = Tracer(path=trace_path)
+    with pytest.raises(KeyboardInterrupt):
+        run("统计标记", InterruptingClient(script=scripts), registry, tracer, max_steps=12)
+    tracer.abort()
+
+    state_path = trace_path.with_suffix(".state.json")
+    checkpoint = RunCheckpoint.load(state_path)
+    assert checkpoint.step == 3
+    assert checkpoint.next_step == 3
+    assert checkpoint.next_call_index == 1
+    assert len(checkpoint.pending_calls) == 2
+    assert sum(message.role == "tool" for message in checkpoint.messages) == 3
+
+    class CapturingClient(FakeClient):
+        instances = []
+
+        def __init__(self):
+            super().__init__(script=[[ToolCall("finish", "finish", '{"summary": "完成"}')]])
+            self.received_messages = []
+            self.instances.append(self)
+
+        def complete(self, messages, tools=None, max_tokens=None):
+            self.received_messages = list(messages)
+            return super().complete(messages, tools, max_tokens)
+
+    monkeypatch.setattr("agent.llm.FakeClient", CapturingClient)
+    resume_path = state_path if resume_with_state_file else trace_path
+    assert main(
+        [
+            "--resume",
+            str(resume_path),
+            "--provider",
+            "fake",
+            "--root",
+            str(tmp_path),
+            "--max-steps",
+            "12",
+            "--quiet",
+        ]
+    ) == 0
+    client = CapturingClient.instances[-1]
+
+    events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    tool_events = [event for event in events if event["kind"] == "tool"]
+    resumed_start = [
+        event for event in events if event["kind"] == "run_start" and event.get("resumed_from")
+    ]
+    run_end = next(event for event in reversed(events) if event["kind"] == "run_end")
+    assert len(resumed_start) == 1
+    assert run_end["steps"] == 4
+    assert run_end["stop_reason"] == "finished"
+    assert sum('"pattern": "MATCH"' in event["arguments"] for event in tool_events) == 1
+    assert sum('"pattern": "OTHER"' in event["arguments"] for event in tool_events) == 1
+    assert sum(message.role == "tool" for message in client.received_messages) == 4
+    assert run_end["usage"]["total"] == 600

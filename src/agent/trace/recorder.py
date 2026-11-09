@@ -32,14 +32,22 @@ def cost_yuan(usage: Usage) -> float:
 class Tracer:
     """将单次运行的事件追加为 JSONL，并维护本次累计用量与成本。"""
 
-    def __init__(self, path: Path | None = None, run_id: str | None = None) -> None:
+    def __init__(
+        self,
+        path: Path | None = None,
+        run_id: str | None = None,
+        append: bool = False,
+        resumed_from: str | None = None,
+        total_usage: Usage | None = None,
+        total_cost: float = 0.0,
+    ) -> None:
         self.run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         self.path = path or Path("traces") / f"{self.run_id}.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = self.path.open("w", encoding="utf-8", newline="\n")
-        self.total_usage = Usage()
-        self.total_cost = 0.0
-        self.event("run_start", run_id=self.run_id)
+        self._fh = self.path.open("a" if append else "w", encoding="utf-8", newline="\n")
+        self.total_usage = total_usage or Usage()
+        self.total_cost = total_cost
+        self.event("run_start", run_id=self.run_id, resumed_from=resumed_from)
 
     def event(self, kind: str, **payload) -> dict:
         """写入并立即 flush 单条事件，降低运行中断时丢失 trace 的风险。"""
@@ -104,4 +112,9 @@ class Tracer:
             },
             **payload,
         )
+        self._fh.close()
+
+    def abort(self, **payload) -> None:
+        """记录可恢复的中断并关闭文件，不写成任务正常结束。"""
+        self.event("run_interrupted", **payload)
         self._fh.close()

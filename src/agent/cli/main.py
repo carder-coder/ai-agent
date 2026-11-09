@@ -26,7 +26,8 @@ def load_dotenv(start: Path) -> Path | None:
 def main(argv: list[str] | None = None) -> int:
     """解析 CLI 参数、装配 provider 和工具，执行一次任务并返回进程退出码。"""
     parser = argparse.ArgumentParser(prog="agent", description="A1 最小闭环命令行")
-    parser.add_argument("--task", required=True, help="任务描述")
+    parser.add_argument("--task", help="任务描述；断点恢复时可省略")
+    parser.add_argument("--resume", help="从 trace JSONL 或对应的 .state.json 断点继续")
     parser.add_argument("--max-steps", type=int, default=int(os.environ.get("AGENT_MAX_STEPS", 12)))
     parser.add_argument("--provider", choices=["doubao", "fake"], default="doubao")
     parser.add_argument(
@@ -38,16 +39,55 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", default="", help="工具可访问的仓库根目录，默认当前目录")
     parser.add_argument("--quiet", action="store_true", help="只打印结论")
     args = parser.parse_args(argv)
+    if not args.task and not args.resume:
+        parser.error("--task 和 --resume 至少提供一个")
 
     root = Path(args.root or os.environ.get("AGENT_PROJECT_ROOT") or Path.cwd()).resolve()
     # 先加载仓库配置，再初始化 provider，确保 ARK_* 配置在构造客户端时可见。
     load_dotenv(root)
 
     from ..llm import DoubaoClient, FakeClient, ProviderError
-    from ..loop import run
+    from ..loop import RunCheckpoint, run
     from ..loop.agent_loop import CONCISE_SYSTEM_PROMPT, SYSTEM_PROMPT
     from ..tools import build_registry
     from ..trace import Tracer
+
+    checkpoint = None
+    resume_source = None
+    if args.resume:
+        resume_source = Path(args.resume).resolve()
+        if resume_source.name.endswith(".state.json"):
+            state_path = resume_source
+            trace_path = resume_source.with_name(
+                resume_source.name.removesuffix(".state.json") + ".jsonl"
+            )
+        elif resume_source.suffix == ".jsonl":
+            state_path = resume_source.with_suffix(".state.json")
+            trace_path = resume_source
+        else:
+            parser.error("--resume 必须指向 .jsonl trace 或 .state.json 文件")
+        try:
+            checkpoint = RunCheckpoint.load(state_path)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if checkpoint.status in {"finished", "no_tool_call", "no_new_info"}:
+            parser.error(f"任务已经结束，不能从此断点恢复：{checkpoint.status}")
+        if args.task and args.task != checkpoint.task:
+            parser.error("--task 与断点记录的原任务不一致")
+        recorded_trace_path = Path(checkpoint.trace_path)
+        if recorded_trace_path.resolve() != trace_path:
+            parser.error("断点记录的 trace 路径与 --resume 文件不匹配")
+        if not trace_path.is_file():
+            parser.error(f"原 trace 不存在，无法追加恢复记录：{trace_path}")
+        task = checkpoint.task
+    else:
+        trace_path = None
+        task = args.task
+
+    if task is None:
+        parser.error("无法从参数或断点获取任务描述")
+    if args.max_steps < 1:
+        parser.error("--max-steps 必须大于 0")
 
     if args.provider == "doubao":
         try:
@@ -59,16 +99,33 @@ def main(argv: list[str] | None = None) -> int:
         client = FakeClient()
 
     registry = build_registry(root)
-    tracer = Tracer()
+    if checkpoint:
+        tracer = Tracer(
+            path=trace_path,
+            run_id=checkpoint.run_id,
+            append=True,
+            resumed_from=str(resume_source),
+            total_usage=checkpoint.usage,
+            total_cost=checkpoint.total_cost_yuan,
+        )
+    else:
+        tracer = Tracer()
     prompt = CONCISE_SYSTEM_PROMPT if args.prompt_variant == "concise" else SYSTEM_PROMPT
-    result = run(
-        args.task,
-        client,
-        registry,
-        tracer,
-        max_steps=args.max_steps,
-        system_prompt=prompt,
-    )
+    try:
+        result = run(
+            task,
+            client,
+            registry,
+            tracer,
+            max_steps=args.max_steps,
+            system_prompt=prompt,
+            checkpoint=checkpoint,
+        )
+    except KeyboardInterrupt:
+        state_path = tracer.path.with_suffix(".state.json")
+        tracer.abort(state_path=str(state_path))
+        print(f"任务已中断，可用以下命令恢复：--resume {state_path}")
+        return 130
     tracer.close(stop_reason=result.stop_reason, steps=result.steps)
 
     if not args.quiet:
