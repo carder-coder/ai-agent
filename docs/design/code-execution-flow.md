@@ -2,8 +2,9 @@
 
 - 分析对象：`src/agent`（A1 最小闭环）及其配套脚本、测试
 - 代码基线：当前工作区 `main`，`src/agent` 下 18 个 Python 文件（含 `__init__`）、约 1200 行
-- 本文依据源码逐行核对整理，所有"行号"均指当前文件中的实际位置
-- 核对方式：逐文件阅读调用关系，并用单测复核（25 条全部通过）
+- 行号基线：第 1 周分析时的 commit `9e2a833`。第 2 周加入上下文策略后，`cli/main.py`、
+  `agent_loop.py`、`recorder.py` 的行号有变动，符号与主流程不变；第 2 周增量见第 10 节
+- 核对方式：逐文件阅读调用关系，并用单测复核（当前 46 条通过）
 - 阅读顺序建议：第 1 节看分层 → 第 2、3 节看主流程 → 第 5、6 节查函数 → 第 8、9 节看数据与边界
 
 ---
@@ -57,12 +58,15 @@ flowchart TB
 | --- | --- | --- | --- |
 | 入口 | `src/agent/cli/main.py` | 参数解析、`.env` 加载、provider/工具/tracer 装配、断点解析、结果打印与退出码 | `main()`、`load_dotenv()` |
 | 编排 | `src/agent/loop/agent_loop.py` | 状态机主循环、停止判定、重复调用护栏、断点保存/恢复 | `run()`、`RunCheckpoint`、`RunResult` |
+| 上下文 | `src/agent/context/` | 每次请求的消息装配：全量拼接与滑窗；不修改完整对话 | `plan_context()`、`ContextPlan` |
 | 模型 | `src/agent/llm/` | 供应商适配（流式、usage、429 退避、错误归类）与离线替身 | `LLMClient`、`DoubaoClient`、`FakeClient` |
 | 工具 | `src/agent/tools/` | 工具注册、schema 生成、参数校验、执行与错误归一化；四个只读工具 | `ToolRegistry`、`build_registry()`、`FINISH_TOOL` |
 | 观测 | `src/agent/trace/recorder.py` | JSONL 事件落盘、token 累计、成本估算 | `Tracer`、`cost_yuan()` |
 | 外部脚本 | `scripts/probe.py`、`press_429.py`、`replay.py` | 连通性四项自检、429 压测、trace 重放核对 | 独立 CLI |
 
-**依赖注入的落点**：`run()` 只依赖 `LLMClient` 协议（`llm/base.py:10`）、`ToolRegistry`、`Tracer` 三个抽象，因此主循环无需知道用的是豆包还是 `FakeClient`，测试全部用离线替身跑通。
+**依赖注入的落点**：`run()` 只依赖 `LLMClient` 协议（`llm/base.py:10`）、`ToolRegistry`、`Tracer`
+三个抽象，上下文装配收敛到纯函数 `plan_context()`，因此主循环无需知道用的是豆包还是
+`FakeClient`，测试全部用离线替身跑通。
 
 ---
 
@@ -122,9 +126,12 @@ flowchart TD
 
 ## 3. 核心循环状态机（`run()`）
 
-这是全仓最关键的一段代码（`src/agent/loop/agent_loop.py:195-291`）。一句话概括：
+这是全仓最关键的一段代码（`src/agent/loop/agent_loop.py`，当前 L220-326；下图沿用第 1 周基线行号）。一句话概括：
 
 > 每一"步"最多调用一次模型，然后顺序执行本步返回的全部工具调用；`finish`、重复调用、上游异常、步数耗尽四类情况负责终止。
+
+> 第 2 周在"问模型"之前插入了 `plan_context()`（第 10 节），下图保留第 1 周基线，
+> 差异只有"发给模型的消息由 `messages` 改为 `plan.messages`"，其余分支不变。
 
 ### 3.1 主流程图
 
@@ -441,27 +448,98 @@ cost = (非缓存输入 × ARK_PRICE_IN
 
 ---
 
-## 10. 一页速查
+## 10. 第 2 周增量：上下文策略（2026-11-15）
+
+第 2 周把"本次请求发哪些消息"从循环里拆成独立纯函数：`full` 与 `window` 共用同一提示模板，
+由 `--context-strategy` 一个参数切换；系统提示、工具 schema、工具执行与断点逻辑都不变。
+
+```mermaid
+flowchart TD
+    A["run() 准备请求<br/>agent_loop.py:220-230"] --> B["plan_context(messages, strategy, window)<br/>strategies.py:86"]
+    B --> C{"strategy"}
+    C -- "full" --> D["全部 messages 原样返回<br/>strategies.py:98-105"]
+    C -- "window" --> E["锚点：开头 system + 首条 user<br/>_anchor_end L39"]
+    E --> F["按 assistant 切轮，每轮含其 tool 结果<br/>_split_turns L49"]
+    F --> G["保留最近 window_turns 轮<br/>strategies.py:111-116"]
+    G --> H["丢弃无法配对的孤立 tool 消息<br/>_drop_orphan_tools L71"]
+    D --> I["client.complete(plan.messages)<br/>agent_loop.py:232"]
+    H --> I
+    I --> J["record_llm(context=plan.to_trace())<br/>agent_loop.py:240-245"]
+```
+
+### 10.1 两种策略与关键约定
+
+| 策略 | 装配规则 | 说明 |
+| --- | --- | --- |
+| `full`（默认） | 原样返回全部 `messages` | 保持第 1 周行为，成本随步数线性增长 |
+| `window` | 锚点（system + 首条 user）+ 最近 `window_turns` 轮 | 一轮 = 一条 assistant 响应及其**全部** tool 结果，整轮保留或整轮丢弃 |
+
+- 只裁请求，不动会话：`messages`、`.state.json` 断点、`--resume` 仍基于全量历史。
+- 锚点固定：窗口再小也保留 system 与任务原文，避免滑窗把任务本身裁掉。
+- 配对完整：`_drop_orphan_tools()` 兜底移除找不到父调用的 tool 消息，避免供应商拒收。
+- `window_turns < 1` 或未知策略直接 `ValueError`，不静默退化。
+
+### 10.2 入口、断点与 trace
+
+| 位置 | 变化 |
+| --- | --- |
+| `cli/main.py:39-50` | `--context-strategy {full,window}` 与 `--context-window N`，策略是唯一开关 |
+| `cli/main.py:102-113` | 恢复时未显式指定策略/窗口，则沿用断点；随后统一校验窗口 > 0 |
+| `agent_loop.py:170-171` | `run()` 新增 `context_strategy`、`context_window`，未指定时沿用断点或默认 `full` / 4 |
+| `agent_loop.py:65-67` | `RunCheckpoint` 新增两个字段，保存于 `L152-154`，读取于 `L99-104` |
+| `agent_loop.py:226-230` | 每次请求前计算 `ContextPlan`，`L240-245` 把统计写入 `llm` 事件 |
+| `recorder.py:60-83` | `record_llm(..., context=...)`；事件字段 `context={strategy,total,used,dropped,window_turns}` |
+| `recorder.py:51` | `run_start` 增加 `task`，便于从 trace 回捞评测集任务 |
+| `scripts/replay.py` | 有 `context` 时打印每步保留条数，如 `保留 6/14 条，丢弃 8` |
+
+### 10.3 评测与跑批
+
+| 文件 | 作用 |
+| --- | --- |
+| `cases/context_cases.jsonl` | 50 条固定任务，四类 13/13/12/12，字段 `id/category/task/expect` |
+| `scripts/check_cases.py` | 校验条数、字段、类别合法、ID 唯一与均衡性 |
+| `scripts/run_cases.py` | 同一批任务按 `--strategy` 跑批，结果 JSONL 含 token/成本/步数/trace |
+| `tests/test_context.py` | 策略边界、工具配对、CLI 切换、恢复继承 |
+| `tests/test_cases.py` | 冻结评测集的契约 |
+| `tests/test_run_cases.py` | 选择逻辑与 dry-run 不触发模型调用 |
+
+一次批量运行的组合方式：
+
+```text
+run_cases.py --strategy full   → 每条用例一个 Tracer → 结果追加 JSONL
+run_cases.py --strategy window --window 2 → 同一批任务换装配策略，指标可横向比较
+```
+
+第 2 周的局限：窗口按"轮"而不是 token 预算裁剪；只做保留/丢弃，不做摘要或相关性排序
+（留给 11-16 摘要、11-17 BM25）；也没有控制关键信息在上下文中的相对位置。
+
+---
+
+## 11. 一页速查
 
 ```
 命令入口      python -m agent.cli --task/--resume
               └─ cli.main.main()  cli/main.py:26
 
 装配顺序      load_dotenv → 断点解析 → client → registry → tracer → prompt
-              （.env 必须先于 client 构造，见 cli/main.py:47-53）
+              （.env 必须先于 client 构造，见 cli/main.py:57-65）
 
-主循环        loop.agent_loop.run()  agent_loop.py:149
-              ├─ 问模型   client.complete()          agent_loop.py:202
-              ├─ 执行     registry.invoke()           agent_loop.py:255
-              ├─ 回填     messages.append(tool)       agent_loop.py:259
+上下文        --context-strategy {full,window}（唯一开关）
+              └─ plan_context()  context/strategies.py:86
+                 window = system+首条user 锚点 + 最近 N 轮工具交互
+
+主循环        loop.agent_loop.run()  agent_loop.py:162
+              ├─ 问模型   client.complete(plan.messages)  agent_loop.py:232
+              ├─ 执行     registry.invoke()               agent_loop.py:290
+              ├─ 回填     messages.append(tool)           agent_loop.py:294
               └─ 判断停   finish / no_tool_call / no_new_info /
-                          provider_error / max_steps  agent_loop.py:216-278
+                          provider_error / max_steps      agent_loop.py:305-313
 
 四个工具      read_file / search_files / run_shell / finish
               tools/__init__.py:15-41
 
 两类落盘      traces/<run>.jsonl   事件流（llm/tool/finish/…）
-              traces/<run>.state.json  断点（messages+游标+累计用量）
+              traces/<run>.state.json  断点（messages+游标+用量+上下文策略）
 
 退出码        0=finished  1=其他停止原因  2=配置/参数错误  130=中断
 ```
