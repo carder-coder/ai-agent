@@ -18,7 +18,14 @@ def test_loop_finishes(tmp_path: Path) -> None:
     """验证工具调用后执行 finish 时循环正常结束并记录完整 trace。"""
     (tmp_path / "a.py").write_text("# TODO one\n", encoding="utf-8")
     tracer = Tracer(path=tmp_path / "traces" / "t.jsonl")
-    result = run("统计 TODO", FakeClient(), build_registry(tmp_path), tracer, max_steps=6)
+    result = run(
+        "统计 TODO",
+        FakeClient(),
+        build_registry(tmp_path),
+        tracer,
+        max_steps=6,
+        context_strategy="full",
+    )
     tracer.close(stop_reason=result.stop_reason)
     assert result.stop_reason == "finished"
     assert "离线冒烟完成" in result.answer
@@ -46,7 +53,14 @@ def test_loop_stops_on_max_steps(tmp_path: Path) -> None:
         for i in range(5)
     ]
     tracer = Tracer(path=tmp_path / "traces" / "t2.jsonl")
-    result = run("死循环", FakeClient(script=script), build_registry(tmp_path), tracer, max_steps=3)
+    result = run(
+        "死循环",
+        FakeClient(script=script),
+        build_registry(tmp_path),
+        tracer,
+        max_steps=3,
+        context_strategy="full",
+    )
     tracer.close(stop_reason=result.stop_reason)
     assert result.stop_reason == "no_new_info"
     assert result.steps == 3
@@ -65,7 +79,13 @@ def test_loop_records_provider_error(tmp_path: Path) -> None:
             raise ProviderTimeout("上游超时：测试")
 
     tracer = Tracer(path=tmp_path / "traces" / "provider-error.jsonl")
-    result = run("测试上游故障", TimeoutClient(), build_registry(tmp_path), tracer)
+    result = run(
+        "测试上游故障",
+        TimeoutClient(),
+        build_registry(tmp_path),
+        tracer,
+        context_strategy="full",
+    )
     tracer.close(stop_reason=result.stop_reason)
 
     events = [json.loads(line) for line in tracer.path.read_text(encoding="utf-8").splitlines()]
@@ -105,7 +125,7 @@ def test_tool_failure_is_returned_to_model_and_loop_continues(tmp_path: Path) ->
         ]
     )
     tracer = Tracer(path=tmp_path / "traces" / "tool-error.jsonl")
-    result = run("测试工具失败回填", client, registry, tracer)
+    result = run("测试工具失败回填", client, registry, tracer, context_strategy="full")
     tracer.close(stop_reason=result.stop_reason)
 
     events = [json.loads(line) for line in tracer.path.read_text(encoding="utf-8").splitlines()]
@@ -127,7 +147,13 @@ def test_loop_finishes_with_plain_text_response(tmp_path: Path) -> None:
             )
 
     tracer = Tracer(path=tmp_path / "traces" / "plain-text.jsonl")
-    result = run("直接回答", TextClient(), build_registry(tmp_path), tracer)
+    result = run(
+        "直接回答",
+        TextClient(),
+        build_registry(tmp_path),
+        tracer,
+        context_strategy="full",
+    )
     tracer.close(stop_reason=result.stop_reason)
 
     assert result.stop_reason == "no_tool_call", "无工具调用的响应应走 no_tool_call 分支"
@@ -171,7 +197,14 @@ def test_loop_resumes_pending_tool_calls_without_replaying_completed_ones(
     trace_path = tmp_path / "traces" / "resume.jsonl"
     tracer = Tracer(path=trace_path)
     with pytest.raises(KeyboardInterrupt):
-        run("统计标记", InterruptingClient(script=scripts), registry, tracer, max_steps=12)
+        run(
+            "统计标记",
+            InterruptingClient(script=scripts),
+            registry,
+            tracer,
+            max_steps=12,
+            context_strategy="full",
+        )
     tracer.abort()
 
     state_path = trace_path.with_suffix(".state.json")
@@ -206,6 +239,8 @@ def test_loop_resumes_pending_tool_calls_without_replaying_completed_ones(
             str(tmp_path),
             "--max-steps",
             "12",
+            "--context-strategy",
+            "full",
             "--quiet",
         ]
     ) == 0

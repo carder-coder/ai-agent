@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..context import (
+    DEFAULT_CONTEXT_STRATEGY,
     DEFAULT_SUMMARY_VERSION,
     DEFAULT_WINDOW_TURNS,
+    RETRIEVAL_BUDGET_CHARS,
+    RETRIEVAL_KEEP_RECENT,
     STRATEGIES,
     SUMMARY_KEEP_TURNS,
     SUMMARY_PROMPTS,
@@ -17,6 +21,7 @@ from ..context import (
     Summarizer,
     SummaryError,
     plan_context,
+    plan_retrieval_context,
     plan_summary_context,
 )
 from ..llm import LLMClient, Message, ProviderError, ToolCall, Usage
@@ -74,10 +79,11 @@ class RunCheckpoint:
     last_key: tuple[str, str] | None = None
     repeats: int = 0
     status: str = "in_progress"
-    context_strategy: str = "full"
+    context_strategy: str = DEFAULT_CONTEXT_STRATEGY
     context_window: int = DEFAULT_WINDOW_TURNS
     summary_version: str = DEFAULT_SUMMARY_VERSION
     summary_threshold: int = SUMMARY_TRIGGER_CHARS
+    retrieval_budget: int = RETRIEVAL_BUDGET_CHARS
 
     @classmethod
     def load(cls, path: Path) -> RunCheckpoint:
@@ -121,6 +127,9 @@ class RunCheckpoint:
             summary_threshold = int(data.get("summary_threshold", SUMMARY_TRIGGER_CHARS))
             if summary_threshold < 1:
                 raise ValueError(f"摘要阈值必须大于 0：{summary_threshold}")
+            retrieval_budget = int(data.get("retrieval_budget", RETRIEVAL_BUDGET_CHARS))
+            if retrieval_budget < 1:
+                raise ValueError(f"检索预算必须大于 0：{retrieval_budget}")
             checkpoint = cls(
                 run_id=data["run_id"],
                 trace_path=data["trace_path"],
@@ -139,6 +148,7 @@ class RunCheckpoint:
                 context_window=context_window,
                 summary_version=summary_version,
                 summary_threshold=summary_threshold,
+                retrieval_budget=retrieval_budget,
             )
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError(f"断点状态无效：{path}: {exc}") from exc
@@ -175,11 +185,20 @@ class RunCheckpoint:
             "context_window": self.context_window,
             "summary_version": self.summary_version,
             "summary_threshold": self.summary_threshold,
+            "retrieval_budget": self.retrieval_budget,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(path.name + ".tmp")
         temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(path)
+        # 并发跑批时 Windows 偶尔短暂占用 .tmp，重试几次避免整条用例失败。
+        for attempt in range(3):
+            try:
+                temporary.replace(path)
+                return
+            except PermissionError:
+                if attempt == 2:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
 
 
 def run(
@@ -194,6 +213,7 @@ def run(
     context_window: int | None = None,
     summary_version: str | None = None,
     summary_threshold: int | None = None,
+    retrieval_budget: int | None = None,
 ) -> RunResult:
     """运行最多 max_steps 轮的工具循环，并在每次模型/工具交互时写 trace。
 
@@ -201,7 +221,9 @@ def run(
     因此断点恢复、重复检测和工具回填不受策略影响。未显式指定时沿用断点设置。
     """
     if context_strategy is None:
-        context_strategy = checkpoint.context_strategy if checkpoint else "full"
+        context_strategy = (
+            checkpoint.context_strategy if checkpoint else DEFAULT_CONTEXT_STRATEGY
+        )
     if context_window is None:
         context_window = checkpoint.context_window if checkpoint else DEFAULT_WINDOW_TURNS
     if summary_version is None:
@@ -214,6 +236,12 @@ def run(
         raise ValueError(f"未知摘要提示版本：{summary_version}")
     if summary_threshold < 1:
         raise ValueError(f"摘要阈值必须大于 0，收到 {summary_threshold}")
+    if retrieval_budget is None:
+        retrieval_budget = (
+            checkpoint.retrieval_budget if checkpoint else RETRIEVAL_BUDGET_CHARS
+        )
+    if retrieval_budget < 1:
+        raise ValueError(f"检索预算必须大于 0，收到 {retrieval_budget}")
     summarizer = (
         Summarizer(client, version=summary_version) if context_strategy == "summary" else None
     )
@@ -251,6 +279,7 @@ def run(
             context_window=context_window,
             summary_version=summary_version,
             summary_threshold=summary_threshold,
+            retrieval_budget=retrieval_budget,
         )
         state.save(checkpoint_path)
 
@@ -306,6 +335,12 @@ def run(
                     messages,
                     strategy="window",
                     window_turns=context_window,
+                )
+            elif context_strategy == "retrieval":
+                plan = plan_retrieval_context(
+                    messages,
+                    budget_chars=retrieval_budget,
+                    keep_recent=RETRIEVAL_KEEP_RECENT,
                 )
             else:
                 plan = plan_context(

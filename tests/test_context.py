@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from agent.context import DEFAULT_WINDOW_TURNS, STRATEGIES, plan_context
+from agent.context import (
+    DEFAULT_CONTEXT_STRATEGY,
+    DEFAULT_WINDOW_TURNS,
+    STRATEGIES,
+    plan_context,
+)
 from agent.llm import FakeClient, Message, ToolCall, Usage
 from agent.loop import RunCheckpoint, RunResult, run
 from agent.tools import build_registry
@@ -136,14 +141,17 @@ def test_window_keeps_all_calls_of_one_turn() -> None:
 def test_context_plan_serializes_for_trace() -> None:
     """trace 字段要能直接比较两种策略的保留/丢弃条数。"""
     plan = plan_context(_conversation(3), "window", window_turns=1)
+    trace = plan.to_trace()
 
-    assert plan.to_trace() == {
+    keys = ("strategy", "total", "used", "dropped", "window_turns")
+    assert {key: trace[key] for key in keys} == {
         "strategy": "window",
         "total": 8,
         "used": 4,
         "dropped": 4,
         "window_turns": 1,
     }
+    assert [item["index"] for item in trace["dropped_detail"]] == [0, 1]
 
 
 @pytest.mark.parametrize(("strategy", "window"), [("window", 0), ("bogus", 4)])
@@ -198,13 +206,15 @@ def test_run_applies_window_and_records_context(tmp_path: Path) -> None:
     contexts = [event["context"] for event in events if event["kind"] == "llm"]
     assert [item["used"] for item in contexts] == [2, 4, 6, 6, 6]
     assert all(item["strategy"] == "window" for item in contexts)
-    assert contexts[-1] == {
+    last = contexts[-1]
+    assert {key: last[key] for key in ("strategy", "total", "used", "dropped", "window_turns")} == {
         "strategy": "window",
         "total": 10,
         "used": 6,
         "dropped": 4,
         "window_turns": 2,
     }
+    assert [item["index"] for item in last["dropped_detail"]] == [0, 1]
 
     state = json.loads((tmp_path / "traces" / "window.state.json").read_text(encoding="utf-8"))
     assert len(state["messages"]) == 11, "断点必须保留全量对话，不能只存滑窗"
@@ -218,12 +228,19 @@ def test_run_full_sends_growing_history(tmp_path: Path) -> None:
     """同一条脚本换 full 策略时请求消息持续增长，证明只改一个参数即可对照。"""
     client = _CapturingClient(_script(4))
     tracer = Tracer(path=tmp_path / "traces" / "full.jsonl")
-    result = run("统计", client, build_registry(tmp_path), tracer, max_steps=8)
+    result = run(
+        "统计",
+        client,
+        build_registry(tmp_path),
+        tracer,
+        max_steps=8,
+        context_strategy="full",
+    )
     tracer.close(stop_reason=result.stop_reason, steps=result.steps)
 
     assert result.stop_reason == "finished"
     assert [len(messages) for messages in client.seen] == [2, 4, 6, 8, 10]
-    assert set(STRATEGIES) == {"full", "window", "summary"}
+    assert set(STRATEGIES) == {"full", "window", "summary", "retrieval"}
     assert DEFAULT_WINDOW_TURNS >= 1
 
 
@@ -252,6 +269,18 @@ def test_run_inherits_context_settings_from_checkpoint(tmp_path: Path) -> None:
     assert result.stop_reason == "finished"
     assert len(client.seen[0]) == 4, "锚点 2 条 + 最近 1 轮 2 条"
     assert [m.tool_call_id for m in client.seen[0] if m.role == "tool"] == ["c2"]
+
+
+def test_run_default_strategy_comes_from_config(tmp_path: Path) -> None:
+    """不传策略时 run 使用集中配置的默认值，而不是散落在循环里的字面量。"""
+    client = _CapturingClient([[ToolCall("fin", "finish", '{"summary": "完成"}')]])
+    tracer = Tracer(path=tmp_path / "traces" / "default.jsonl")
+    result = run("任务", client, build_registry(tmp_path), tracer, max_steps=2)
+    tracer.close(stop_reason=result.stop_reason, steps=result.steps)
+
+    events = [json.loads(line) for line in tracer.path.read_text(encoding="utf-8").splitlines()]
+    contexts = [event["context"] for event in events if event["kind"] == "llm"]
+    assert contexts[0]["strategy"] == DEFAULT_CONTEXT_STRATEGY
 
 
 def test_cli_exposes_single_strategy_switch(monkeypatch, tmp_path: Path, capsys) -> None:

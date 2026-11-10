@@ -38,9 +38,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--context-strategy",
-        choices=["full", "window", "summary"],
+        choices=["full", "window", "summary", "retrieval"],
         default=None,
-        help="上下文策略：full 全量；window 滑窗；summary 超阈值摘要。恢复时默认沿用断点",
+        help="上下文策略：full/window/summary/retrieval。恢复时默认沿用断点",
     )
     parser.add_argument(
         "--context-window",
@@ -59,6 +59,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="摘要触发阈值（上下文字符数）；恢复时默认沿用断点",
     )
+    parser.add_argument(
+        "--retrieval-budget",
+        type=int,
+        default=None,
+        help="检索策略的上下文字符预算；恢复时默认沿用断点",
+    )
     parser.add_argument("--root", default="", help="工具可访问的仓库根目录，默认当前目录")
     parser.add_argument("--quiet", action="store_true", help="只打印结论")
     args = parser.parse_args(argv)
@@ -70,7 +76,9 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv(root)
 
     from ..context import (
+        DEFAULT_CONTEXT_STRATEGY,
         DEFAULT_SUMMARY_VERSION,
+        RETRIEVAL_BUDGET_CHARS,
         SUMMARY_PROMPTS,
         SUMMARY_TRIGGER_CHARS,
     )
@@ -116,7 +124,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("无法从参数或断点获取任务描述")
     # 断点恢复默认沿用原策略，避免一次 --resume 把 window 实验悄悄变回 full。
     if args.context_strategy is None:
-        args.context_strategy = checkpoint.context_strategy if checkpoint else "full"
+        args.context_strategy = (
+            checkpoint.context_strategy if checkpoint else DEFAULT_CONTEXT_STRATEGY
+        )
     if args.context_window is None:
         args.context_window = (
             checkpoint.context_window
@@ -133,6 +143,12 @@ def main(argv: list[str] | None = None) -> int:
             if checkpoint
             else int(os.environ.get("AGENT_SUMMARY_THRESHOLD", SUMMARY_TRIGGER_CHARS))
         )
+    if args.retrieval_budget is None:
+        args.retrieval_budget = (
+            checkpoint.retrieval_budget
+            if checkpoint
+            else int(os.environ.get("AGENT_RETRIEVAL_BUDGET", RETRIEVAL_BUDGET_CHARS))
+        )
     if args.max_steps < 1:
         parser.error("--max-steps 必须大于 0")
     if args.context_window < 1:
@@ -141,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--summary-version 必须是：{'、'.join(SUMMARY_PROMPTS)}")
     if args.summary_threshold < 1:
         parser.error("--summary-threshold 必须大于 0")
+    if args.retrieval_budget < 1:
+        parser.error("--retrieval-budget 必须大于 0")
 
     if args.provider == "doubao":
         try:
@@ -178,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
             context_window=args.context_window,
             summary_version=args.summary_version,
             summary_threshold=args.summary_threshold,
+            retrieval_budget=args.retrieval_budget,
         )
     except KeyboardInterrupt:
         state_path = tracer.path.with_suffix(".state.json")
@@ -194,6 +213,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"[context] summary（阈值 {args.summary_threshold} 字符，"
                 f"提示 {args.summary_version}）"
             )
+        elif args.context_strategy == "retrieval":
+            print(f"[context] retrieval（预算 {args.retrieval_budget} 字符）")
         elif args.context_strategy == "window":
             print(f"[context] window（最近 {args.context_window} 轮）")
         else:

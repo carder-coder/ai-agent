@@ -31,6 +31,7 @@ from agent.cli.main import load_dotenv  # noqa: E402
 from agent.context import (  # noqa: E402
     DEFAULT_SUMMARY_VERSION,
     DEFAULT_WINDOW_TURNS,
+    RETRIEVAL_BUDGET_CHARS,
     STRATEGIES,
     SUMMARY_TRIGGER_CHARS,
 )
@@ -96,10 +97,17 @@ def main() -> int:
         default=SUMMARY_TRIGGER_CHARS,
         help="summary 策略触发阈值（上下文字符数）",
     )
+    parser.add_argument(
+        "--retrieval-budget",
+        type=int,
+        default=RETRIEVAL_BUDGET_CHARS,
+        help="retrieval 策略的上下文字符预算",
+    )
     parser.add_argument("--provider", choices=["doubao", "fake"], default="doubao")
     parser.add_argument("--max-steps", type=int, default=12)
     parser.add_argument("--root", default="", help="工具可访问的仓库根目录，默认仓库根")
     parser.add_argument("--category", choices=list(CATEGORIES), help="只跑某一类")
+    parser.add_argument("--ids", nargs="+", help="只跑指定 id，用于补跑失败用例")
     parser.add_argument("--sample-per-category", type=int, default=0, help="每类取前 N 条")
     parser.add_argument("--limit", type=int, default=0, help="总条数上限，0 表示不限制")
     parser.add_argument("--out", default="out/context_results.jsonl", help="结果 JSONL")
@@ -116,6 +124,8 @@ def main() -> int:
         parser.error("--window 必须大于 0")
     if args.summary_threshold < 1:
         parser.error("--summary-threshold 必须大于 0")
+    if args.retrieval_budget < 1:
+        parser.error("--retrieval-budget 必须大于 0")
     if args.max_steps < 1:
         parser.error("--max-steps 必须大于 0")
     if not args.cases.is_file():
@@ -127,6 +137,9 @@ def main() -> int:
         sample_per_category=args.sample_per_category,
         limit=args.limit,
     )
+    if args.ids:
+        wanted = set(args.ids)
+        cases = [case for case in cases if case["id"] in wanted]
     if not cases:
         parser.error("没有选中任何用例")
 
@@ -175,6 +188,7 @@ def main() -> int:
                     context_window=args.window,
                     summary_version=args.summary_version,
                     summary_threshold=args.summary_threshold,
+                    retrieval_budget=args.retrieval_budget,
                 )
                 elapsed_s = round(time.perf_counter() - started, 3)
                 tracer.close(stop_reason=result.stop_reason, steps=result.steps)
@@ -188,6 +202,9 @@ def main() -> int:
                     ),
                     "summary_threshold": (
                         args.summary_threshold if args.strategy == "summary" else None
+                    ),
+                    "retrieval_budget": (
+                        args.retrieval_budget if args.strategy == "retrieval" else None
                     ),
                     "provider": args.provider,
                     "stop_reason": result.stop_reason,
@@ -220,6 +237,9 @@ def main() -> int:
                     ),
                     "summary_threshold": (
                         args.summary_threshold if args.strategy == "summary" else None
+                    ),
+                    "retrieval_budget": (
+                        args.retrieval_budget if args.strategy == "retrieval" else None
                     ),
                     "provider": args.provider,
                     "stop_reason": "exception",
@@ -254,6 +274,8 @@ def main() -> int:
         strategy_note = f"（最近 {args.window} 轮）"
     elif args.strategy == "summary":
         strategy_note = f"（阈值 {args.summary_threshold} 字符，提示 {args.summary_version}）"
+    elif args.strategy == "retrieval":
+        strategy_note = f"（预算 {args.retrieval_budget} 字符）"
     else:
         strategy_note = ""
     print(f"策略: {args.strategy}{strategy_note}")

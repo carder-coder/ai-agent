@@ -56,3 +56,30 @@ def drop_orphan_tools(messages: list[Message]) -> list[Message]:
         for message in messages
         if message.role != "tool" or message.tool_call_id in known_ids
     ]
+
+
+def estimate_context_chars(messages: list[Message]) -> int:
+    """估算请求上下文大小：正文加工具名/参数，作为触发裁剪的廉价代理。"""
+    total = 0
+    for message in messages:
+        total += len(message.content or "")
+        for call in message.tool_calls:
+            total += len(call.name) + len(call.arguments)
+    return total
+
+
+def describe_turn(index: int, turn: list[Message]) -> dict:
+    """为 trace 生成被裁轮次的紧凑描述，用于 badcase 定位。"""
+    tools = [
+        call.name
+        for message in turn
+        if message.role == "assistant"
+        for call in message.tool_calls
+    ]
+    text = " ".join(message.content or "" for message in turn).replace("\n", " ")
+    return {
+        "index": index,
+        "tool": "、".join(tools) if tools else turn[0].role,
+        "chars": estimate_context_chars(turn),
+        "preview": text[:120],
+    }

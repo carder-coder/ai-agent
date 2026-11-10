@@ -11,7 +11,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from ..llm import LLMClient, LLMResponse, Message, Usage
-from ._layout import anchor_end, drop_orphan_tools, split_turns, system_prefix_end
+from ._layout import (
+    anchor_end,
+    describe_turn,
+    drop_orphan_tools,
+    estimate_context_chars,
+    split_turns,
+    system_prefix_end,
+)
 from .config import (
     DEFAULT_SUMMARY_VERSION,
     SUMMARY_KEEP_TURNS,
@@ -63,16 +70,6 @@ class SummaryOutcome:
     covered_messages: int
     cache_hit: bool = False
     response: LLMResponse | None = None
-
-
-def estimate_context_chars(messages: list[Message]) -> int:
-    """估算请求上下文大小：正文加工具名/参数，作为触发摘要的廉价代理。"""
-    total = 0
-    for message in messages:
-        total += len(message.content or "")
-        for call in message.tool_calls:
-            total += len(call.name) + len(call.arguments)
-    return total
 
 
 def render_transcript(messages: list[Message]) -> str:
@@ -267,6 +264,9 @@ def plan_summary_context(
             "keep_turns": keep,
         }
     )
+    dropped_detail = [
+        describe_turn(index, turn) for index, turn in enumerate(turns[: len(turns) - keep])
+    ]
     return (
         ContextPlan(
             strategy="summary",
@@ -276,6 +276,7 @@ def plan_summary_context(
             dropped_messages=total - len(kept),
             window_turns=keep,
             summary=summary_trace,
+            dropped_detail=dropped_detail[:5],
         ),
         outcome,
     )

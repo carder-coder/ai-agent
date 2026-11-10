@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
-STRATEGIES: tuple[str, ...] = ("full", "window", "summary")
+STRATEGIES: tuple[str, ...] = ("full", "window", "summary", "retrieval")
 
-DEFAULT_WINDOW_TURNS = 4
+DEFAULT_CONTEXT_STRATEGY = "full"
+
+DEFAULT_WINDOW_TURNS = 2
 
 # 摘要策略：超过字符阈值时压缩更早的轮次，保留最近若干轮。
 DEFAULT_SUMMARY_VERSION = "v1"
-SUMMARY_TRIGGER_CHARS = 12_000
+SUMMARY_TRIGGER_CHARS = 3_000
 SUMMARY_KEEP_TURNS = 2
 SUMMARY_MAX_TOKENS = 800
 SUMMARY_MAX_TOKENS_CAP = 2_000
 SUMMARY_MAX_ATTEMPTS = 2
 SUMMARY_MAX_INPUT_CHARS = 24_000
+
+# 检索策略：BM25 给每轮打分，按分数选段直到字符预算。
+RETRIEVAL_BUDGET_CHARS = 3_000
+RETRIEVAL_KEEP_RECENT = 1
+RETRIEVAL_MAX_DROPPED_DETAIL = 5
+BM25_K1 = 1.5
+BM25_B = 0.75

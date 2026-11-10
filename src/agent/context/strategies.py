@@ -9,7 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..llm.types import Message
-from ._layout import anchor_end, drop_orphan_tools, split_turns
+from ._layout import (
+    anchor_end,
+    describe_turn,
+    drop_orphan_tools,
+    split_turns,
+)
 from .config import DEFAULT_WINDOW_TURNS, STRATEGIES
 
 
@@ -24,6 +29,8 @@ class ContextPlan:
     dropped_messages: int
     window_turns: int | None = None
     summary: dict | None = None
+    retrieval: dict | None = None
+    dropped_detail: list[dict] | None = None
 
     def to_trace(self) -> dict:
         """序列化成 trace 字段；full 策略也会记录，便于同一批任务对照。"""
@@ -36,6 +43,10 @@ class ContextPlan:
         }
         if self.summary is not None:
             payload["summary"] = self.summary
+        if self.retrieval is not None:
+            payload["retrieval"] = self.retrieval
+        if self.dropped_detail:
+            payload["dropped_detail"] = self.dropped_detail
         return payload
 
 
@@ -71,6 +82,7 @@ def plan_context(
         kept.extend(turn)
     kept = drop_orphan_tools(kept)
 
+    dropped = turns[: max(0, len(turns) - window_turns)]
     return ContextPlan(
         strategy="window",
         messages=kept,
@@ -78,4 +90,5 @@ def plan_context(
         used_messages=len(kept),
         dropped_messages=total - len(kept),
         window_turns=window_turns,
+        dropped_detail=[describe_turn(index, turn) for index, turn in enumerate(dropped[:5])],
     )
