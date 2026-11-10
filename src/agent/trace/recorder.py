@@ -82,6 +82,73 @@ class Tracer:
             payload["context"] = context
         self.event("llm", **payload)
 
+    def record_summary(
+        self,
+        step: int,
+        model: str,
+        response,
+        *,
+        version: str,
+        covered: int,
+        cache_hit: bool = False,
+    ) -> None:
+        """记录一次真实摘要调用：计入总用量与成本，并保留有限预览。"""
+        self.total_usage.add(response.usage)
+        c = cost_yuan(response.usage)
+        self.total_cost += c
+        self.event(
+            "summary",
+            step=step,
+            model=model,
+            version=version,
+            covered=covered,
+            cache_hit=cache_hit,
+            finish_reason=response.finish_reason,
+            attempts=getattr(response, "attempts", 1),
+            usage={
+                "in": response.usage.input_tokens,
+                "out": response.usage.output_tokens,
+                "total": response.usage.total_tokens,
+                "cached": response.usage.cached_tokens,
+            },
+            cost_yuan=round(c, 6),
+            preview=(response.message.content or "")[:300],
+        )
+
+    def record_summary_error(
+        self,
+        step: int,
+        model: str,
+        usage: Usage,
+        *,
+        version: str,
+        attempts: int,
+        finish_reason: str,
+        error: str,
+    ) -> None:
+        """摘要失败也可能已消耗 token：有用量就计入总成本，再写失败事件。"""
+        c = 0.0
+        if usage.total_tokens:
+            self.total_usage.add(usage)
+            c = cost_yuan(usage)
+            self.total_cost += c
+        self.event(
+            "summary_error",
+            step=step,
+            model=model,
+            version=version,
+            attempts=attempts,
+            finish_reason=finish_reason,
+            usage={
+                "in": usage.input_tokens,
+                "out": usage.output_tokens,
+                "total": usage.total_tokens,
+                "cached": usage.cached_tokens,
+            },
+            cost_yuan=round(c, 6),
+            error=error,
+        )
+
     def record_tool(
         self,
         step: int,

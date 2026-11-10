@@ -7,7 +7,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..context import DEFAULT_WINDOW_TURNS, STRATEGIES, plan_context
+from ..context import (
+    DEFAULT_SUMMARY_VERSION,
+    DEFAULT_WINDOW_TURNS,
+    STRATEGIES,
+    SUMMARY_KEEP_TURNS,
+    SUMMARY_PROMPTS,
+    SUMMARY_TRIGGER_CHARS,
+    Summarizer,
+    SummaryError,
+    plan_context,
+    plan_summary_context,
+)
 from ..llm import LLMClient, Message, ProviderError, ToolCall, Usage
 from ..tools import FINISH_TOOL, ToolRegistry
 from ..trace import Tracer, cost_yuan
@@ -65,6 +76,8 @@ class RunCheckpoint:
     status: str = "in_progress"
     context_strategy: str = "full"
     context_window: int = DEFAULT_WINDOW_TURNS
+    summary_version: str = DEFAULT_SUMMARY_VERSION
+    summary_threshold: int = SUMMARY_TRIGGER_CHARS
 
     @classmethod
     def load(cls, path: Path) -> RunCheckpoint:
@@ -102,6 +115,12 @@ class RunCheckpoint:
             context_window = int(data.get("context_window", DEFAULT_WINDOW_TURNS))
             if context_window < 1:
                 raise ValueError(f"上下文窗口必须大于 0：{context_window}")
+            summary_version = data.get("summary_version", DEFAULT_SUMMARY_VERSION)
+            if summary_version not in SUMMARY_PROMPTS:
+                raise ValueError(f"不支持的摘要提示版本：{summary_version}")
+            summary_threshold = int(data.get("summary_threshold", SUMMARY_TRIGGER_CHARS))
+            if summary_threshold < 1:
+                raise ValueError(f"摘要阈值必须大于 0：{summary_threshold}")
             checkpoint = cls(
                 run_id=data["run_id"],
                 trace_path=data["trace_path"],
@@ -118,6 +137,8 @@ class RunCheckpoint:
                 status=data.get("status", "in_progress"),
                 context_strategy=context_strategy,
                 context_window=context_window,
+                summary_version=summary_version,
+                summary_threshold=summary_threshold,
             )
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError(f"断点状态无效：{path}: {exc}") from exc
@@ -152,6 +173,8 @@ class RunCheckpoint:
             "status": self.status,
             "context_strategy": self.context_strategy,
             "context_window": self.context_window,
+            "summary_version": self.summary_version,
+            "summary_threshold": self.summary_threshold,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(path.name + ".tmp")
@@ -169,6 +192,8 @@ def run(
     checkpoint: RunCheckpoint | None = None,
     context_strategy: str | None = None,
     context_window: int | None = None,
+    summary_version: str | None = None,
+    summary_threshold: int | None = None,
 ) -> RunResult:
     """运行最多 max_steps 轮的工具循环，并在每次模型/工具交互时写 trace。
 
@@ -179,6 +204,19 @@ def run(
         context_strategy = checkpoint.context_strategy if checkpoint else "full"
     if context_window is None:
         context_window = checkpoint.context_window if checkpoint else DEFAULT_WINDOW_TURNS
+    if summary_version is None:
+        summary_version = checkpoint.summary_version if checkpoint else DEFAULT_SUMMARY_VERSION
+    if summary_threshold is None:
+        summary_threshold = (
+            checkpoint.summary_threshold if checkpoint else SUMMARY_TRIGGER_CHARS
+        )
+    if summary_version not in SUMMARY_PROMPTS:
+        raise ValueError(f"未知摘要提示版本：{summary_version}")
+    if summary_threshold < 1:
+        raise ValueError(f"摘要阈值必须大于 0，收到 {summary_threshold}")
+    summarizer = (
+        Summarizer(client, version=summary_version) if context_strategy == "summary" else None
+    )
     messages = checkpoint.messages if checkpoint else [
         Message(role="system", content=system_prompt),
         Message(role="user", content=task),
@@ -211,6 +249,8 @@ def run(
             status=status,
             context_strategy=context_strategy,
             context_window=context_window,
+            summary_version=summary_version,
+            summary_threshold=summary_threshold,
         )
         state.save(checkpoint_path)
 
@@ -223,11 +263,56 @@ def run(
             # 请求开始前落点；此时中断可安全地重发尚未得到响应的模型请求。
             next_step = step
             save_checkpoint()
-            plan = plan_context(
-                messages,
-                strategy=context_strategy,
-                window_turns=context_window,
-            )
+            if summarizer is not None and summarizer.disabled_reason is None:
+                try:
+                    plan, summary_outcome = plan_summary_context(
+                        messages,
+                        summarizer.summarize,
+                        keep_turns=SUMMARY_KEEP_TURNS,
+                        trigger_chars=summary_threshold,
+                        version=summary_version,
+                    )
+                except (ProviderError, SummaryError) as exc:
+                    # 摘要失败不终止任务：本任务内停用摘要并降级为滑窗。
+                    summarizer.disable(str(exc))
+                    tracer.record_summary_error(
+                        step,
+                        getattr(client, "model", "unknown"),
+                        getattr(exc, "usage", Usage()),
+                        version=summary_version,
+                        attempts=getattr(exc, "attempts", 0),
+                        finish_reason=getattr(exc, "finish_reason", ""),
+                        error=str(exc),
+                    )
+                    save_checkpoint()
+                    plan = plan_context(
+                        messages,
+                        strategy="window",
+                        window_turns=context_window,
+                    )
+                    summary_outcome = None
+                if summary_outcome is not None and summary_outcome.response is not None:
+                    tracer.record_summary(
+                        step,
+                        getattr(client, "model", "unknown"),
+                        summary_outcome.response,
+                        version=summary_outcome.version,
+                        covered=summary_outcome.covered_messages,
+                    )
+                    # 摘要调用已产生真实费用，先落一次断点再发主请求。
+                    save_checkpoint()
+            elif summarizer is not None:
+                plan = plan_context(
+                    messages,
+                    strategy="window",
+                    window_turns=context_window,
+                )
+            else:
+                plan = plan_context(
+                    messages,
+                    strategy=context_strategy,
+                    window_turns=context_window,
+                )
             try:
                 resp = client.complete(plan.messages, tools=schemas)
             except ProviderError as exc:

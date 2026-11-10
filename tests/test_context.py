@@ -223,7 +223,7 @@ def test_run_full_sends_growing_history(tmp_path: Path) -> None:
 
     assert result.stop_reason == "finished"
     assert [len(messages) for messages in client.seen] == [2, 4, 6, 8, 10]
-    assert STRATEGIES == ("full", "window")
+    assert set(STRATEGIES) == {"full", "window", "summary"}
     assert DEFAULT_WINDOW_TURNS >= 1
 
 

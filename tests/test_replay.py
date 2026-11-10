@@ -47,3 +47,45 @@ def test_replay_orders_step_header_and_deduplicates_tool_names(
     assert "工具=search_files, search_files" not in output
     assert "参数缺失（旧 trace 未记录）" in output
     assert "\n\n" not in output
+
+
+def test_replay_includes_summary_cost_in_total(tmp_path: Path, capsys) -> None:
+    """摘要事件也必须参与成本核对，否则重放会误报与 run_end 有差值。"""
+    trace = tmp_path / "summary.jsonl"
+    events = [
+        {"kind": "run_start", "run_id": "summary", "ts": "2026-11-10T10:00:00"},
+        {
+            "kind": "llm",
+            "step": 2,
+            "usage": {"in": 100, "out": 10, "total": 110},
+            "cost_yuan": 0.001,
+            "ts": "2026-11-10T10:00:01",
+        },
+        {
+            "kind": "summary",
+            "step": 2,
+            "version": "v1",
+            "covered": 3,
+            "attempts": 1,
+            "usage": {"in": 200, "out": 50, "total": 250},
+            "cost_yuan": 0.002,
+            "ts": "2026-11-10T10:00:02",
+        },
+        {
+            "kind": "run_end",
+            "steps": 2,
+            "stop_reason": "finished",
+            "usage": {"in": 300, "out": 60, "total": 360},
+            "total_cost_yuan": 0.003,
+            "ts": "2026-11-10T10:00:03",
+        },
+    ]
+    trace.write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+    assert replay(trace) == 0
+    output = capsys.readouterr().out
+    assert "摘要: v1 覆盖 3 条" in output
+    assert "与 run_end 差值: 0.0 元" in output

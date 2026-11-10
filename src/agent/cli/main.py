@@ -38,15 +38,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--context-strategy",
-        choices=["full", "window"],
+        choices=["full", "window", "summary"],
         default=None,
-        help="上下文策略：full 全量拼接；window 只保留最近若干轮。恢复时默认沿用断点",
+        help="上下文策略：full 全量；window 滑窗；summary 超阈值摘要。恢复时默认沿用断点",
     )
     parser.add_argument(
         "--context-window",
         type=int,
         default=None,
         help="window 策略保留的最近轮数（一轮=一次响应及其工具结果）",
+    )
+    parser.add_argument(
+        "--summary-version",
+        default=None,
+        help="摘要提示版本：v1（默认）/v0（回滚用）；恢复时默认沿用断点",
+    )
+    parser.add_argument(
+        "--summary-threshold",
+        type=int,
+        default=None,
+        help="摘要触发阈值（上下文字符数）；恢复时默认沿用断点",
     )
     parser.add_argument("--root", default="", help="工具可访问的仓库根目录，默认当前目录")
     parser.add_argument("--quiet", action="store_true", help="只打印结论")
@@ -58,6 +69,11 @@ def main(argv: list[str] | None = None) -> int:
     # 先加载仓库配置，再初始化 provider，确保 ARK_* 配置在构造客户端时可见。
     load_dotenv(root)
 
+    from ..context import (
+        DEFAULT_SUMMARY_VERSION,
+        SUMMARY_PROMPTS,
+        SUMMARY_TRIGGER_CHARS,
+    )
     from ..llm import DoubaoClient, FakeClient, ProviderError
     from ..loop import RunCheckpoint, run
     from ..loop.agent_loop import CONCISE_SYSTEM_PROMPT, SYSTEM_PROMPT
@@ -107,10 +123,24 @@ def main(argv: list[str] | None = None) -> int:
             if checkpoint
             else int(os.environ.get("AGENT_CONTEXT_WINDOW", 4))
         )
+    if args.summary_version is None:
+        args.summary_version = (
+            checkpoint.summary_version if checkpoint else DEFAULT_SUMMARY_VERSION
+        )
+    if args.summary_threshold is None:
+        args.summary_threshold = (
+            checkpoint.summary_threshold
+            if checkpoint
+            else int(os.environ.get("AGENT_SUMMARY_THRESHOLD", SUMMARY_TRIGGER_CHARS))
+        )
     if args.max_steps < 1:
         parser.error("--max-steps 必须大于 0")
     if args.context_window < 1:
         parser.error("--context-window 必须大于 0")
+    if args.summary_version not in SUMMARY_PROMPTS:
+        parser.error(f"--summary-version 必须是：{'、'.join(SUMMARY_PROMPTS)}")
+    if args.summary_threshold < 1:
+        parser.error("--summary-threshold 必须大于 0")
 
     if args.provider == "doubao":
         try:
@@ -146,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint=checkpoint,
             context_strategy=args.context_strategy,
             context_window=args.context_window,
+            summary_version=args.summary_version,
+            summary_threshold=args.summary_threshold,
         )
     except KeyboardInterrupt:
         state_path = tracer.path.with_suffix(".state.json")
@@ -157,7 +189,12 @@ def main(argv: list[str] | None = None) -> int:
     if not args.quiet:
         print(f"[provider] {client.name}/{client.model}")
         print(f"[steps] {result.steps}（{result.stop_reason}）")
-        if args.context_strategy == "window":
+        if args.context_strategy == "summary":
+            print(
+                f"[context] summary（阈值 {args.summary_threshold} 字符，"
+                f"提示 {args.summary_version}）"
+            )
+        elif args.context_strategy == "window":
             print(f"[context] window（最近 {args.context_window} 轮）")
         else:
             print("[context] full（全量拼接）")

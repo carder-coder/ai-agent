@@ -39,11 +39,21 @@ def replay(path: Path) -> int:
     stop_reason = _required(end, "stop_reason", missing)
     llm_events = [event for event in events if event.get("kind") == "llm"]
     tool_events: dict[int, list[dict[str, Any]]] = {}
+    summary_events: dict[int, list[dict[str, Any]]] = {}
+    summary_errors: dict[int, list[dict[str, Any]]] = {}
     for event in events:
         if event.get("kind") == "tool":
             step = _required(event, "step", missing)
             if step is not None:
                 tool_events.setdefault(step, []).append(event)
+        elif event.get("kind") == "summary":
+            step = _required(event, "step", missing)
+            if step is not None:
+                summary_events.setdefault(step, []).append(event)
+        elif event.get("kind") == "summary_error":
+            step = _required(event, "step", missing)
+            if step is not None:
+                summary_errors.setdefault(step, []).append(event)
 
     timestamps = [
         datetime.fromisoformat(event["ts"])
@@ -91,6 +101,28 @@ def replay(path: Path) -> int:
                 f"保留 {context.get('used')}/{context.get('total')} 条，"
                 f"丢弃 {context.get('dropped')}"
             )
+        for summary in summary_events.get(step, []):
+            summary_usage = summary.get("usage")
+            if not isinstance(summary_usage, dict):
+                summary_usage = {}
+            print(
+                f"  摘要: {summary.get('version', '字段缺失：version')} "
+                f"覆盖 {summary.get('covered', '字段缺失：covered')} 条，"
+                f"token={summary_usage.get('in', '?')}/{summary_usage.get('out', '?')}，"
+                f"尝试 {summary.get('attempts', 1)} 次，"
+                f"成本={summary.get('cost_yuan', '字段缺失：cost_yuan')} 元"
+            )
+        for failed in summary_errors.get(step, []):
+            failed_usage = failed.get("usage")
+            if not isinstance(failed_usage, dict):
+                failed_usage = {}
+            print(
+                f"  摘要失败: {failed.get('version', '字段缺失：version')} "
+                f"{failed.get('attempts', '?')} 次，"
+                f"token={failed_usage.get('in', '?')}/{failed_usage.get('out', '?')}，"
+                f"成本={failed.get('cost_yuan', '?')} 元 | "
+                f"{str(failed.get('error', ''))[:60]}"
+            )
         for tool in associated_tools:
             args = _required(tool, "arguments", missing)
             if args is None:
@@ -110,7 +142,12 @@ def replay(path: Path) -> int:
         missing.add("usage")
     total_tokens = _required(usage_total, "total", missing)
     total_cost = _required(end, "total_cost_yuan", missing)
-    llm_costs = [event.get("cost_yuan") for event in llm_events]
+    cost_events = [
+        event
+        for event in events
+        if event.get("kind") in {"llm", "summary", "summary_error"}
+    ]
+    llm_costs = [event.get("cost_yuan") for event in cost_events]
     if any(value is None for value in llm_costs):
         computed_cost = None
         missing.add("cost_yuan")

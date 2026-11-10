@@ -28,7 +28,12 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from check_cases import CATEGORIES, load_cases  # noqa: E402 同目录脚本复用加载逻辑
 
 from agent.cli.main import load_dotenv  # noqa: E402
-from agent.context import DEFAULT_WINDOW_TURNS, STRATEGIES  # noqa: E402
+from agent.context import (  # noqa: E402
+    DEFAULT_SUMMARY_VERSION,
+    DEFAULT_WINDOW_TURNS,
+    STRATEGIES,
+    SUMMARY_TRIGGER_CHARS,
+)
 from agent.llm import DoubaoClient, FakeClient, ProviderError  # noqa: E402
 from agent.loop import run  # noqa: E402
 from agent.loop.agent_loop import SYSTEM_PROMPT  # noqa: E402
@@ -80,6 +85,17 @@ def main() -> int:
         default=DEFAULT_WINDOW_TURNS,
         help="window 策略保留的最近轮数",
     )
+    parser.add_argument(
+        "--summary-version",
+        default=DEFAULT_SUMMARY_VERSION,
+        help="summary 策略使用的固定提示版本（v1 默认，v0 回滚）",
+    )
+    parser.add_argument(
+        "--summary-threshold",
+        type=int,
+        default=SUMMARY_TRIGGER_CHARS,
+        help="summary 策略触发阈值（上下文字符数）",
+    )
     parser.add_argument("--provider", choices=["doubao", "fake"], default="doubao")
     parser.add_argument("--max-steps", type=int, default=12)
     parser.add_argument("--root", default="", help="工具可访问的仓库根目录，默认仓库根")
@@ -98,6 +114,8 @@ def main() -> int:
 
     if args.window < 1:
         parser.error("--window 必须大于 0")
+    if args.summary_threshold < 1:
+        parser.error("--summary-threshold 必须大于 0")
     if args.max_steps < 1:
         parser.error("--max-steps 必须大于 0")
     if not args.cases.is_file():
@@ -155,6 +173,8 @@ def main() -> int:
                     system_prompt=SYSTEM_PROMPT,
                     context_strategy=args.strategy,
                     context_window=args.window,
+                    summary_version=args.summary_version,
+                    summary_threshold=args.summary_threshold,
                 )
                 elapsed_s = round(time.perf_counter() - started, 3)
                 tracer.close(stop_reason=result.stop_reason, steps=result.steps)
@@ -163,6 +183,12 @@ def main() -> int:
                     "category": case["category"],
                     "strategy": args.strategy,
                     "window": args.window if args.strategy == "window" else None,
+                    "summary_version": (
+                        args.summary_version if args.strategy == "summary" else None
+                    ),
+                    "summary_threshold": (
+                        args.summary_threshold if args.strategy == "summary" else None
+                    ),
                     "provider": args.provider,
                     "stop_reason": result.stop_reason,
                     "ok": result.stop_reason == "finished",
@@ -189,6 +215,12 @@ def main() -> int:
                     "category": case["category"],
                     "strategy": args.strategy,
                     "window": args.window if args.strategy == "window" else None,
+                    "summary_version": (
+                        args.summary_version if args.strategy == "summary" else None
+                    ),
+                    "summary_threshold": (
+                        args.summary_threshold if args.strategy == "summary" else None
+                    ),
                     "provider": args.provider,
                     "stop_reason": "exception",
                     "ok": False,
@@ -218,8 +250,13 @@ def main() -> int:
     total_cost = sum(record["cost_yuan"] for record in records)
     total_tokens = sum(record["total_tokens"] for record in records)
     print()
-    window_note = f"（最近 {args.window} 轮）" if args.strategy == "window" else ""
-    print(f"策略: {args.strategy}{window_note}")
+    if args.strategy == "window":
+        strategy_note = f"（最近 {args.window} 轮）"
+    elif args.strategy == "summary":
+        strategy_note = f"（阈值 {args.summary_threshold} 字符，提示 {args.summary_version}）"
+    else:
+        strategy_note = ""
+    print(f"策略: {args.strategy}{strategy_note}")
     print(f"完成: {finished}/{len(records)}，异常: {errors}")
     print(f"token 合计: {total_tokens}，成本合计: {total_cost:.6f} 元")
     print(f"结果: {out_path}")
