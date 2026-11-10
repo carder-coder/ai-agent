@@ -28,6 +28,7 @@ def repo(tmp_path: Path) -> Path:
 
 
 def test_read_file_has_line_numbers(repo: Path) -> None:
+    """验证读取文件时输出总行数和带行号的内容。"""
     reg = build_registry(repo)
     out = reg.invoke("read_file", '{"path": "src/demo.py", "offset": 0, "max_lines": 2}')
     assert out.ok
@@ -36,6 +37,7 @@ def test_read_file_has_line_numbers(repo: Path) -> None:
 
 
 def test_read_file_rejects_outside(repo: Path) -> None:
+    """验证读取仓库根目录之外的路径会被安全策略拒绝。"""
     reg = build_registry(repo)
     out = reg.invoke("read_file", '{"path": "../secret.txt"}')
     assert not out.ok
@@ -43,6 +45,7 @@ def test_read_file_rejects_outside(repo: Path) -> None:
 
 
 def test_read_file_rejects_too_many_lines(repo: Path) -> None:
+    """验证读取行数超过参数上限时返回参数校验失败。"""
     reg = build_registry(repo)
     out = reg.invoke("read_file", '{"path": "src/demo.py", "max_lines": 500}')
     assert not out.ok
@@ -50,6 +53,7 @@ def test_read_file_rejects_too_many_lines(repo: Path) -> None:
 
 
 def test_read_file_missing_path_is_reported_as_tool_failure(repo: Path) -> None:
+    """验证目标文件不存在时工具结果标记为失败，而非返回成功文本。"""
     reg = build_registry(repo)
     out = reg.invoke("read_file", '{"path": "docs/not-exist.md"}')
 
@@ -59,6 +63,7 @@ def test_read_file_missing_path_is_reported_as_tool_failure(repo: Path) -> None:
 
 
 def test_search_files_counts(repo: Path) -> None:
+    """验证搜索结果包含匹配行总数和对应文件行号。"""
     reg = build_registry(repo)
     out = reg.invoke("search_files", '{"pattern": "TODO|FIXME", "glob": "*.py", "limit": 10}')
     assert out.ok
@@ -67,6 +72,7 @@ def test_search_files_counts(repo: Path) -> None:
 
 
 def test_search_files_total_when_limit_hit(repo: Path) -> None:
+    """验证达到展示条数上限时仍统计全量命中数并说明截断数量。"""
     (repo / "src" / "many.py").write_text("\n".join(["# TODO"] * 10) + "\n", encoding="utf-8")
     reg = build_registry(repo)
     out = reg.invoke("search_files", '{"pattern": "TODO", "glob": "*.py", "limit": 3}')
@@ -76,6 +82,7 @@ def test_search_files_total_when_limit_hit(repo: Path) -> None:
 
 
 def test_search_files_summary_counts_per_file_without_context(repo: Path) -> None:
+    """验证摘要模式按文件统计命中数且不返回匹配上下文。"""
     (repo / "src" / "many.py").write_text("# MATCH\n# MATCH\n", encoding="utf-8")
     reg = build_registry(repo)
     out = reg.invoke(
@@ -89,6 +96,7 @@ def test_search_files_summary_counts_per_file_without_context(repo: Path) -> Non
 
 
 def test_shell_marks_truncation(repo: Path) -> None:
+    """验证 shell 输出超过长度限制时会明确标记内容已截断。"""
     reg = build_registry(repo)
     payload = json.dumps({"command": 'python -c "print(\'x\'*6000)"'})
     out = reg.invoke("run_shell", payload)
@@ -97,6 +105,7 @@ def test_shell_marks_truncation(repo: Path) -> None:
 
 
 def test_run_shell_blocks_dangerous(repo: Path) -> None:
+    """验证危险命令被拒绝，同时允许执行安全的只读状态查询。"""
     reg = build_registry(repo)
     rm = reg.invoke("run_shell", '{"command": "rm -rf src"}')
     push = reg.invoke("run_shell", '{"command": "git push origin main"}')
@@ -109,6 +118,7 @@ def test_run_shell_blocks_dangerous(repo: Path) -> None:
 
 
 def test_finish_marks_done(repo: Path) -> None:
+    """验证 finish 工具成功返回带 FINISHED 前缀的完成结果。"""
     reg = build_registry(repo)
     out = reg.invoke("finish", '{"summary": "结论"}')
     assert out.ok

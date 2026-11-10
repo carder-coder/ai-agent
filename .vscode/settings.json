@@ -7,6 +7,6 @@
   ],
   "python.analysis.typeCheckingMode": "basic",
   "ruff.lint.enable": true,
-  "editor.hover.enabled": true,
+  "editor.hover.enabled": "on",
   "editor.multiCursorModifier": "alt"
 }

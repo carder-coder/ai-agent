@@ -13,6 +13,7 @@ def test_replay_orders_step_header_and_deduplicates_tool_names(
     tmp_path: Path,
     capsys,
 ) -> None:
+    """验证重放先显示步骤再显示参数、去重工具名并标注旧 trace 缺失字段。"""
     trace = tmp_path / "sample.jsonl"
     events = [
         {"kind": "run_start", "run_id": "sample", "ts": "2026-11-09T10:00:00"},

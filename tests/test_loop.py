@@ -15,6 +15,7 @@ from agent.trace import Tracer
 
 
 def test_loop_finishes(tmp_path: Path) -> None:
+    """验证工具调用后执行 finish 时循环正常结束并记录完整 trace。"""
     (tmp_path / "a.py").write_text("# TODO one\n", encoding="utf-8")
     tracer = Tracer(path=tmp_path / "traces" / "t.jsonl")
     result = run("统计 TODO", FakeClient(), build_registry(tmp_path), tracer, max_steps=6)
@@ -39,6 +40,7 @@ def test_loop_finishes(tmp_path: Path) -> None:
 
 
 def test_loop_stops_on_max_steps(tmp_path: Path) -> None:
+    """验证连续重复调用同一工具会触发 loop_guard 并停止空转。"""
     script = [
         [ToolCall(f"c{i}", "search_files", '{"pattern": "TODO", "glob": "*.py"}')]
         for i in range(5)
@@ -57,6 +59,7 @@ def test_loop_stops_on_max_steps(tmp_path: Path) -> None:
 
 
 def test_loop_records_provider_error(tmp_path: Path) -> None:
+    """验证上游超时会设置 provider_error 停止原因并写入 trace。"""
     class TimeoutClient(FakeClient):
         def complete(self, messages, tools=None, max_tokens=None):
             raise ProviderTimeout("上游超时：测试")
@@ -74,6 +77,7 @@ def test_loop_records_provider_error(tmp_path: Path) -> None:
 
 
 def test_tool_failure_is_returned_to_model_and_loop_continues(tmp_path: Path) -> None:
+    """验证工具异常以 ERROR observation 回传模型后循环仍可继续完成。"""
     from pydantic import BaseModel
 
     class Args(BaseModel):
@@ -115,6 +119,7 @@ def test_tool_failure_is_returned_to_model_and_loop_continues(tmp_path: Path) ->
 
 
 def test_loop_finishes_with_plain_text_response(tmp_path: Path) -> None:
+    """验证模型直接返回文本且不请求工具时以 no_tool_call 结束。"""
     class TextClient(FakeClient):
         def complete(self, messages, tools=None, max_tokens=None):
             return LLMResponse(
@@ -135,6 +140,7 @@ def test_loop_resumes_pending_tool_calls_without_replaying_completed_ones(
     monkeypatch: pytest.MonkeyPatch,
     resume_with_state_file: bool,
 ) -> None:
+    """验证从 trace 或 state 恢复时继续待处理调用，且不重复已完成调用。"""
     scripts = [
         [ToolCall("c1", "search_files", '{"pattern": "TODO", "glob": "*.py"}')],
         [ToolCall("c2", "search_files", '{"pattern": "FIXME", "glob": "*.py"}')],

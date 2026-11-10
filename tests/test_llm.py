@@ -30,6 +30,7 @@ def _frag(index, name=None, arguments=None, call_id=None):
 
 
 def test_tool_call_fragments_are_assembled(monkeypatch) -> None:
+    """验证流式响应中的工具名与 JSON 参数分片能按序拼接成完整调用。"""
     client = DoubaoClient(model="stub", api_key="stub", base_url="http://127.0.0.1:9/v1")
     chunks = [
         _delta(tool_calls=[_frag(0, name="ad", arguments='{"a": 1', call_id="call_1")]),
@@ -49,6 +50,7 @@ def test_tool_call_fragments_are_assembled(monkeypatch) -> None:
 
 
 def test_rate_limit_retries_against_local_http_server() -> None:
+    """用本地 HTTP 服务验证遇到 429 时的重试次数、退避间隔和最终响应。"""
     attempts: list[int] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -131,6 +133,7 @@ def test_rate_limit_retries_against_local_http_server() -> None:
 
 
 def test_read_timeout_is_mapped_to_provider_timeout() -> None:
+    """验证 HTTP 读取超时会映射为带有上游超时信息的 ProviderTimeout。"""
     def timeout_request(_request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("mock 上游响应超时")
 
