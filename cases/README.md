@@ -1,7 +1,7 @@
 # 上下文评测集（context_cases）
 
 固定 50 条任务，用于第 2 周 A2 context-lab 的策略对照：同一批任务分别用
-`full`、`window`（后续还有 summary、retrieval）运行，比较成功率、token、成本、
+`full`、`window`、`summary`（后续还有 retrieval）运行，比较成功率、token、成本、
 步数与延迟。任务本身不随策略变化，因此结果可以横向比较。
 
 ## 格式

@@ -26,6 +26,7 @@ uv run python scripts/probe.py                                  # 连通性四�
 uv run python -m agent.cli --task "统计本仓库 TODO 与 FIXME 数量并列出前十条" --max-steps 12
 uv run python -m agent.cli --task "离线冒烟" --provider fake     # 无密钥时验证循环
 uv run python -m agent.cli --task "读 README 并总结" --context-strategy window --context-window 4
+uv run python -m agent.cli --task "读 README 并总结" --context-strategy summary --summary-threshold 3000
 uv run python -m agent.cli --resume traces\<run_id>.jsonl --max-steps 12 # 从中断处继续
 uv run pytest -q                                                # 单测
 uv run pytest --cov=agent --cov-report=term-missing -q           # 单测与覆盖率
@@ -34,6 +35,7 @@ uv run python scripts/replay.py --trace traces\<run_id>.jsonl  # 核对单次 tr
 uv run python scripts/check_cases.py                            # 校验 50 条评测集
 uv run python scripts/run_cases.py --strategy full --dry-run    # 只看选中哪些用例
 uv run python scripts/run_cases.py --strategy window --sample-per-category 1
+uv run python scripts/run_cases.py --strategy summary --summary-threshold 3000 --limit 1
 uv run python scripts/press_429.py --model <mini-model-id> --concurrency 8 --rounds 20
 ```
 
@@ -46,17 +48,25 @@ trace 落在 `traces/<run_id>.jsonl`，每行一个事件（llm / tool / finish 
 
 ## 上下文策略（第 2 周）
 
-`--context-strategy` 一个参数切换两种装配方式，系统提示、工具 schema 与提示模板都不变：
+`--context-strategy` 一个参数切换三种装配方式，系统提示、工具 schema 与提示模板都不变：
 
 | 策略 | 行为 | 适用 |
 | --- | --- | --- |
 | `full`（默认） | 每次请求携带全部 `messages` | 历史短，需要完整证据链 |
 | `window` | 保留 system + 首条 user 作为锚点，再保留最近 `--context-window` 轮（默认 4）；更早的轮次整轮丢弃，工具调用与其结果不拆开 | 步数多，需要控制上下文预算 |
+| `summary` | 估算上下文字符数超过 `--summary-threshold`（默认 12000）时，把更早的轮次交给同一模型压缩，保留锚点、摘要与最近 2 轮；未超阈值等同 `full` | 多步任务需要压预算，同时尽量保留早期信息 |
 
-滑窗只裁剪"发给模型的消息"：`messages`、`.state.json` 断点与恢复逻辑仍保存全量；
-`--resume` 未显式指定策略时沿用断点里的策略，避免恢复时悄悄改变实验条件。
-每条 `llm` trace 事件带 `context` 字段 `{strategy,total,used,dropped,window_turns}`，
-`scripts/replay.py` 会打印每步保留条数。
+摘要的约束：
+
+- 提示按版本固定：`v1` 当前默认，`v0` 旧版保留用于回滚；`--summary-version v0` 切换，版本写入 trace 与断点。
+- 摘要用同一个 client/model、不挂工具；默认 `max_tokens=800`，空正文且 `finish_reason=length` 时翻倍重试一次（上限 2000），两次用量合并计费。
+- 摘要失败（上游异常或空输出）时本任务内停用摘要并降级为 `window`，记 `summary_error`；失败消耗的 token 也计入总成本。
+- 每条 `llm` 事件带 `context.summary`；另有 `summary` / `summary_error` 事件，记录版本、覆盖条数、尝试次数、`finish_reason` 与成本。
+
+三种策略都只裁剪"发给模型的消息"：`messages`、`.state.json` 断点与恢复逻辑仍保存全量；
+`--resume` 未显式指定策略/版本/阈值时沿用断点里的设置，避免恢复时悄悄改变实验条件。
+每条 `llm` trace 事件带 `context` 字段 `{strategy,total,used,dropped,window_turns,summary}`，
+`scripts/replay.py` 会打印每步保留条数与摘要/失败信息。
 
 固定评测集 `cases/context_cases.jsonl` 共 50 条（`single_qa` 13 / `multi_tool` 13 /
 `long_read` 12 / `refusal` 12），说明见 `cases/README.md`。`scripts/check_cases.py`
@@ -65,8 +75,8 @@ trace 落在 `traces/<run_id>.jsonl`，每行一个事件（llm / tool / finish 
 
 ## 当前阶段
 
-阶段一第 2 周：A1 最小闭环完成；A2 context-lab 的 `full` / `window` 两种上下文策略已接入，
-50 条固定评测集已冻结，后续补摘要与检索策略。
+阶段一第 2 周：A1 最小闭环完成；A2 context-lab 的 `full` / `window` / `summary` 三种上下文策略已接入，
+50 条固定评测集已冻结，后续补 BM25 检索策略。
 
 ## 已知问题
 
@@ -79,6 +89,8 @@ trace 落在 `traces/<run_id>.jsonl`，每行一个事件（llm / tool / finish 
 - 运行产物放 `out/`，trace 放 `traces/`，两者都已忽略且不被 search_files 扫描
 - `window` 只裁剪请求，断点仍保存全量历史，长任务的内存与 `.state.json` 体积不会下降
 - 滑窗按"轮"裁剪，不按 token 预算裁剪；预算控制留到摘要与检索策略
+- `summary` 的触发阈值是字符估算，不是真实 tokenizer；摘要按请求重算，不是滚动摘要，长任务会多次调用摘要
+- 摘要可能被 `max_tokens` 截断，trace 的 `finish_reason=length` 可筛出；`v0` 旧版提示在长上下文中更易返回空正文（实测触发重试与降级），回滚前需评估
 
 ## 目录
 
@@ -86,7 +98,7 @@ trace 落在 `traces/<run_id>.jsonl`，每行一个事件（llm / tool / finish 
 src/agent/llm/       模型适配：base 协议、doubao、fake
 src/agent/tools/     注册表与四个工具
 src/agent/loop/      循环与状态机
-src/agent/context/   上下文装配：full 全量、window 滑窗
+src/agent/context/   上下文装配：full 全量、window 滑窗、summary 摘要
 src/agent/trace/     JSONL 落盘与成本计量
 src/agent/cli/       命令行入口
 cases/               50 条固定评测集与格式说明

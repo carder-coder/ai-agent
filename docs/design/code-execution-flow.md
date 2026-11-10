@@ -4,7 +4,7 @@
 - 代码基线：当前工作区 `main`，`src/agent` 下 18 个 Python 文件（含 `__init__`）、约 1200 行
 - 行号基线：第 1 周分析时的 commit `9e2a833`。第 2 周加入上下文策略后，`cli/main.py`、
   `agent_loop.py`、`recorder.py` 的行号有变动，符号与主流程不变；第 2 周增量见第 10 节
-- 核对方式：逐文件阅读调用关系，并用单测复核（当前 46 条通过）
+- 核对方式：逐文件阅读调用关系，并用单测复核（当前 64 条通过）
 - 阅读顺序建议：第 1 节看分层 → 第 2、3 节看主流程 → 第 5、6 节查函数 → 第 8、9 节看数据与边界
 
 ---
@@ -448,49 +448,60 @@ cost = (非缓存输入 × ARK_PRICE_IN
 
 ---
 
-## 10. 第 2 周增量：上下文策略（2026-11-15）
+## 10. 第 2 周增量：上下文策略（2026-11-15 至 11-16）
 
-第 2 周把"本次请求发哪些消息"从循环里拆成独立纯函数：`full` 与 `window` 共用同一提示模板，
+第 2 周把"本次请求发哪些消息"从循环里拆成独立模块：`full`、`window`、`summary` 共用同一提示模板，
 由 `--context-strategy` 一个参数切换；系统提示、工具 schema、工具执行与断点逻辑都不变。
 
 ```mermaid
 flowchart TD
-    A["run() 准备请求<br/>agent_loop.py:220-230"] --> B["plan_context(messages, strategy, window)<br/>strategies.py:86"]
-    B --> C{"strategy"}
-    C -- "full" --> D["全部 messages 原样返回<br/>strategies.py:98-105"]
-    C -- "window" --> E["锚点：开头 system + 首条 user<br/>_anchor_end L39"]
-    E --> F["按 assistant 切轮，每轮含其 tool 结果<br/>_split_turns L49"]
-    F --> G["保留最近 window_turns 轮<br/>strategies.py:111-116"]
-    G --> H["丢弃无法配对的孤立 tool 消息<br/>_drop_orphan_tools L71"]
-    D --> I["client.complete(plan.messages)<br/>agent_loop.py:232"]
-    H --> I
-    I --> J["record_llm(context=plan.to_trace())<br/>agent_loop.py:240-245"]
+    A["run() 准备请求<br/>agent_loop.py:266-315"] --> B{"context_strategy"}
+    B -- "full / window" --> C["plan_context()<br/>strategies.py:42"]
+    B -- "summary" --> D["plan_summary_context()<br/>summary.py:189"]
+    D --> E{"估算字符 > 阈值?"}
+    E -- "否" --> F["等同 full，原样返回"]
+    E -- "是" --> G["更早轮次 → Summarizer.summarize()<br/>summary.py:123<br/>同一 client + 固定版本提示"]
+    G --> H["锚点 + system 摘要消息 + 最近轮<br/>summary.py:242-259"]
+    G --> I["record_summary() 计入成本<br/>agent_loop.py:295"]
+    C --> J["client.complete(plan.messages)<br/>agent_loop.py:317"]
+    F --> J
+    H --> J
+    I --> J
+    J --> K["record_llm(context=plan.to_trace())<br/>agent_loop.py:325"]
 ```
 
-### 10.1 两种策略与关键约定
+### 10.1 三种策略与关键约定
 
 | 策略 | 装配规则 | 说明 |
 | --- | --- | --- |
 | `full`（默认） | 原样返回全部 `messages` | 保持第 1 周行为，成本随步数线性增长 |
 | `window` | 锚点（system + 首条 user）+ 最近 `window_turns` 轮 | 一轮 = 一条 assistant 响应及其**全部** tool 结果，整轮保留或整轮丢弃 |
+| `summary` | 未超字符阈值时等同 `full`；超阈值时摘要更早轮次，锚点 + 摘要 system 消息 + 最近 `keep_turns` 轮 | 摘要调用同一模型、固定版本提示；阈值默认 12000 字符，保留 2 轮 |
 
 - 只裁请求，不动会话：`messages`、`.state.json` 断点、`--resume` 仍基于全量历史。
-- 锚点固定：窗口再小也保留 system 与任务原文，避免滑窗把任务本身裁掉。
-- 配对完整：`_drop_orphan_tools()` 兜底移除找不到父调用的 tool 消息，避免供应商拒收。
-- `window_turns < 1` 或未知策略直接 `ValueError`，不静默退化。
+- 锚点固定：窗口/摘要都保留 system 与任务原文，避免把任务本身裁掉。
+- 配对完整：`drop_orphan_tools()` 兜底移除找不到父调用的 tool 消息，避免供应商拒收。
+- 参数非法（窗口 < 1、未知策略、未知摘要版本、阈值 < 1）直接报错，不静默退化。
+- 摘要失败可降级：本任务内停用摘要并改用 `window`，`summary_error` 事件记录失败及已消耗用量。
 
 ### 10.2 入口、断点与 trace
 
 | 位置 | 变化 |
 | --- | --- |
-| `cli/main.py:39-50` | `--context-strategy {full,window}` 与 `--context-window N`，策略是唯一开关 |
-| `cli/main.py:102-113` | 恢复时未显式指定策略/窗口，则沿用断点；随后统一校验窗口 > 0 |
-| `agent_loop.py:170-171` | `run()` 新增 `context_strategy`、`context_window`，未指定时沿用断点或默认 `full` / 4 |
-| `agent_loop.py:65-67` | `RunCheckpoint` 新增两个字段，保存于 `L152-154`，读取于 `L99-104` |
-| `agent_loop.py:226-230` | 每次请求前计算 `ContextPlan`，`L240-245` 把统计写入 `llm` 事件 |
-| `recorder.py:60-83` | `record_llm(..., context=...)`；事件字段 `context={strategy,total,used,dropped,window_turns}` |
-| `recorder.py:51` | `run_start` 增加 `task`，便于从 trace 回捞评测集任务 |
-| `scripts/replay.py` | 有 `context` 时打印每步保留条数，如 `保留 6/14 条，丢弃 8` |
+| `cli/main.py:39-63` | `--context-strategy {full,window,summary}`、`--context-window`、`--summary-version`、`--summary-threshold` |
+| `cli/main.py:118-143` | 恢复时未显式指定策略/窗口/版本/阈值则沿用断点，随后统一校验 |
+| `agent_loop.py:193-196` | `run()` 新增上下文与摘要参数，未指定时沿用断点或默认值 |
+| `agent_loop.py:77-80` | `RunCheckpoint` 新增 4 个字段，保存于 `L174-177`，读取于 `L112-121` |
+| `agent_loop.py:266-315` | 请求前选策略：summary 走 `plan_summary_context()`，失败降级 window，其余走 `plan_context()` |
+| `agent_loop.py:295` | `record_summary()` 计入摘要调用成本，先落断点再发主请求 |
+| `agent_loop.py:278` | `record_summary_error()` 记录失败事件与已消耗用量 |
+| `recorder.py:60-83` | `record_llm(..., context=...)`；`context` 含 `strategy/total/used/dropped/window_turns/summary` |
+| `recorder.py:85-116` | `record_summary()`：版本、覆盖条数、尝试次数、finish_reason、成本 |
+| `recorder.py:118-156` | `record_summary_error()`：失败也把 token 计入总成本 |
+| `summary.py:27-38` | `SUMMARY_PROMPTS` 固定版本：`v1` 当前，`v0` 回滚 |
+| `summary.py:123-187` | `Summarizer.summarize()`：同 client、固定提示、按内容缓存、空正文翻倍重试 |
+| `summary.py:189-281` | `plan_summary_context()`：阈值判断、摘要插入位置、保留最近轮 |
+| `scripts/replay.py` | 打印上下文保留条数、摘要版本/覆盖/尝试次数与失败信息 |
 
 ### 10.3 评测与跑批
 
@@ -500,18 +511,35 @@ flowchart TD
 | `scripts/check_cases.py` | 校验条数、字段、类别合法、ID 唯一与均衡性 |
 | `scripts/run_cases.py` | 同一批任务按 `--strategy` 跑批，结果 JSONL 含 token/成本/步数/trace |
 | `tests/test_context.py` | 策略边界、工具配对、CLI 切换、恢复继承 |
+| `tests/test_summary.py` | 阈值触发、固定版本、缓存、空摘要重试、失败计费与降级 |
 | `tests/test_cases.py` | 冻结评测集的契约 |
 | `tests/test_run_cases.py` | 选择逻辑与 dry-run 不触发模型调用 |
 
 一次批量运行的组合方式：
 
 ```text
-run_cases.py --strategy full   → 每条用例一个 Tracer → 结果追加 JSONL
+run_cases.py --strategy full      → 每条用例一个 Tracer → 结果追加 JSONL
 run_cases.py --strategy window --window 2 → 同一批任务换装配策略，指标可横向比较
+run_cases.py --strategy summary --summary-threshold 3000 --summary-version v1
+                                  → 摘要策略与版本同样逐条记录
 ```
 
-第 2 周的局限：窗口按"轮"而不是 token 预算裁剪；只做保留/丢弃，不做摘要或相关性排序
-（留给 11-16 摘要、11-17 BM25）；也没有控制关键信息在上下文中的相对位置。
+### 10.4 摘要版本与回滚
+
+| 版本 | 状态 | 提示特征 |
+| --- | --- | --- |
+| `v1` | 当前默认 | 300 字结构化要点，要求不编造、不写开场白 |
+| `v0` | 旧版保留 | 150 字简版，用于 `--summary-version v0` 回滚对照 |
+
+- 版本随 trace 与断点保存；恢复时未显式指定则沿用原版本。
+- 摘要调用与主流程同一个 client/model，不挂工具；`max_tokens=800`，空正文且
+  `finish_reason=length` 时翻倍到 1600 重试一次（上限 2000），两次用量合并计费。
+- 摘要失败后本任务内停用摘要并降级 `window`，避免反复为空摘要付费。
+- 摘要消息是 `system` 角色，插在锚点 system 之后、user 任务之前；只影响请求，不写回 `messages`。
+
+第 2 周的局限：窗口按"轮"而不是 token 预算裁剪；摘要按请求重算而非滚动摘要，
+长任务会多次调用；阈值是字符估算；`v0` 旧版提示在长上下文中更容易返回空正文。
+相关性排序留给 11-17 BM25；也没有控制关键信息在上下文中的相对位置。
 
 ---
 
@@ -524,22 +552,24 @@ run_cases.py --strategy window --window 2 → 同一批任务换装配策略，�
 装配顺序      load_dotenv → 断点解析 → client → registry → tracer → prompt
               （.env 必须先于 client 构造，见 cli/main.py:57-65）
 
-上下文        --context-strategy {full,window}（唯一开关）
-              └─ plan_context()  context/strategies.py:86
-                 window = system+首条user 锚点 + 最近 N 轮工具交互
+上下文        --context-strategy {full,window,summary}（唯一开关）
+              ├─ plan_context()        context/strategies.py:42
+              │    window = system+首条user 锚点 + 最近 N 轮工具交互
+              └─ plan_summary_context() context/summary.py:189
+                   超阈值 → 同一模型按固定版本（v1/v0）摘要，可回滚
 
-主循环        loop.agent_loop.run()  agent_loop.py:162
-              ├─ 问模型   client.complete(plan.messages)  agent_loop.py:232
-              ├─ 执行     registry.invoke()               agent_loop.py:290
-              ├─ 回填     messages.append(tool)           agent_loop.py:294
+主循环        loop.agent_loop.run()  agent_loop.py:185
+              ├─ 问模型   client.complete(plan.messages)  agent_loop.py:317
+              ├─ 执行     registry.invoke()               agent_loop.py:375
+              ├─ 回填     messages.append(tool)           agent_loop.py:379
               └─ 判断停   finish / no_tool_call / no_new_info /
-                          provider_error / max_steps      agent_loop.py:305-313
+                          provider_error / max_steps      agent_loop.py:390-398
 
 四个工具      read_file / search_files / run_shell / finish
               tools/__init__.py:15-41
 
-两类落盘      traces/<run>.jsonl   事件流（llm/tool/finish/…）
-              traces/<run>.state.json  断点（messages+游标+用量+上下文策略）
+两类落盘      traces/<run>.jsonl   事件流（llm/tool/summary/finish/…）
+              traces/<run>.state.json  断点（messages+游标+用量+策略/版本）
 
 退出码        0=finished  1=其他停止原因  2=配置/参数错误  130=中断
 ```
