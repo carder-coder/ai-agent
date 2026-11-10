@@ -4,7 +4,7 @@
 - 代码基线：当前工作区 `main`，`src/agent` 下 18 个 Python 文件（含 `__init__`）、约 1200 行
 - 行号基线：第 1 周分析时的 commit `9e2a833`。第 2 周加入上下文策略后，`cli/main.py`、
   `agent_loop.py`、`recorder.py` 的行号有变动，符号与主流程不变；第 2 周增量见第 10 节
-- 核对方式：逐文件阅读调用关系，并用单测复核（当前 64 条通过）
+- 核对方式：逐文件阅读调用关系，并用单测复核（当前 83 条通过）
 - 阅读顺序建议：第 1 节看分层 → 第 2、3 节看主流程 → 第 5、6 节查函数 → 第 8、9 节看数据与边界
 
 ---
@@ -448,59 +448,58 @@ cost = (非缓存输入 × ARK_PRICE_IN
 
 ---
 
-## 10. 第 2 周增量：上下文策略（2026-11-15 至 11-16）
+## 10. 第 2 周增量：上下文策略（2026-11-15 至 11-20）
 
-第 2 周把"本次请求发哪些消息"从循环里拆成独立模块：`full`、`window`、`summary` 共用同一提示模板，
-由 `--context-strategy` 一个参数切换；系统提示、工具 schema、工具执行与断点逻辑都不变。
+第 2 周把"本次请求发哪些消息"从循环里拆成独立模块：`full`、`window`、`summary`、`retrieval`
+共用同一提示模板，由 `--context-strategy` 一个参数切换；系统提示、工具 schema、工具执行与断点逻辑都不变。
 
 ```mermaid
 flowchart TD
-    A["run() 准备请求<br/>agent_loop.py:266-315"] --> B{"context_strategy"}
-    B -- "full / window" --> C["plan_context()<br/>strategies.py:42"]
-    B -- "summary" --> D["plan_summary_context()<br/>summary.py:189"]
+    A["run() 选策略<br/>agent_loop.py:292-347"] --> B{"context_strategy"}
+    B -- "full / window" --> C["plan_context()<br/>strategies.py:53"]
+    B -- "summary" --> D["plan_summary_context()<br/>summary.py:186"]
     D --> E{"估算字符 > 阈值?"}
-    E -- "否" --> F["等同 full，原样返回"]
-    E -- "是" --> G["更早轮次 → Summarizer.summarize()<br/>summary.py:123<br/>同一 client + 固定版本提示"]
-    G --> H["锚点 + system 摘要消息 + 最近轮<br/>summary.py:242-259"]
-    G --> I["record_summary() 计入成本<br/>agent_loop.py:295"]
-    C --> J["client.complete(plan.messages)<br/>agent_loop.py:317"]
-    F --> J
-    H --> J
-    I --> J
-    J --> K["record_llm(context=plan.to_trace())<br/>agent_loop.py:325"]
+    E -- "否" --> H
+    E -- "是" --> F["Summarizer.summarize()<br/>同 client + 固定版本提示<br/>record_summary() 计费"]
+    B -- "retrieval" --> G["plan_retrieval_context()<br/>retrieval.py:93<br/>BM25 选段到字符预算"]
+    C --> H["client.complete(plan.messages)<br/>agent_loop.py:349"]
+    F --> H
+    G --> H
+    H --> I["record_llm(context=plan.to_trace())<br/>agent_loop.py:357"]
 ```
 
-### 10.1 三种策略与关键约定
+### 10.1 四种策略与关键约定
 
 | 策略 | 装配规则 | 说明 |
 | --- | --- | --- |
-| `full`（默认） | 原样返回全部 `messages` | 保持第 1 周行为，成本随步数线性增长 |
-| `window` | 锚点（system + 首条 user）+ 最近 `window_turns` 轮 | 一轮 = 一条 assistant 响应及其**全部** tool 结果，整轮保留或整轮丢弃 |
-| `summary` | 未超字符阈值时等同 `full`；超阈值时摘要更早轮次，锚点 + 摘要 system 消息 + 最近 `keep_turns` 轮 | 摘要调用同一模型、固定版本提示；阈值默认 12000 字符，保留 2 轮 |
+| `full` | 原样返回全部 `messages` | 第 1 周行为，成本随步数线性增长 |
+| `window` | 锚点（system + 首条 user）+ 最近 `window_turns` 轮 | 一轮 = 一条 assistant 响应及其**全部** tool 结果，整轮保留或整轮丢弃；默认 2 轮 |
+| `summary` | 未超字符阈值时等同 `full`；超阈值时摘要更早轮次，锚点 + 摘要 system 消息 + 最近 `keep_turns` 轮 | 摘要调用同一模型、固定版本提示；默认阈值 3000 字符，保留 2 轮 |
+| `retrieval` | 锚点 + 最近 1 轮固定保留；其余轮次用 BM25 打分，按分数选到字符预算 | 按轮切分，默认预算 3000 字符；被裁轮次写入 `dropped_detail` |
 
 - 只裁请求，不动会话：`messages`、`.state.json` 断点、`--resume` 仍基于全量历史。
-- 锚点固定：窗口/摘要都保留 system 与任务原文，避免把任务本身裁掉。
+- 锚点固定：三种裁剪策略都保留 system 与任务原文，避免把任务本身裁掉。
 - 配对完整：`drop_orphan_tools()` 兜底移除找不到父调用的 tool 消息，避免供应商拒收。
-- 参数非法（窗口 < 1、未知策略、未知摘要版本、阈值 < 1）直接报错，不静默退化。
+- 参数非法（窗口 < 1、未知策略、未知摘要版本、阈值/预算 < 1）直接报错，不静默退化。
 - 摘要失败可降级：本任务内停用摘要并改用 `window`，`summary_error` 事件记录失败及已消耗用量。
+- 检索/滑窗/摘要的每次裁剪都把 `dropped_detail`（索引、工具、字符数、120 字预览）写进 trace，供 badcase 定位。
 
 ### 10.2 入口、断点与 trace
 
 | 位置 | 变化 |
 | --- | --- |
-| `cli/main.py:39-63` | `--context-strategy {full,window,summary}`、`--context-window`、`--summary-version`、`--summary-threshold` |
-| `cli/main.py:118-143` | 恢复时未显式指定策略/窗口/版本/阈值则沿用断点，随后统一校验 |
-| `agent_loop.py:193-196` | `run()` 新增上下文与摘要参数，未指定时沿用断点或默认值 |
-| `agent_loop.py:77-80` | `RunCheckpoint` 新增 4 个字段，保存于 `L174-177`，读取于 `L112-121` |
-| `agent_loop.py:266-315` | 请求前选策略：summary 走 `plan_summary_context()`，失败降级 window，其余走 `plan_context()` |
-| `agent_loop.py:295` | `record_summary()` 计入摘要调用成本，先落断点再发主请求 |
-| `agent_loop.py:278` | `record_summary_error()` 记录失败事件与已消耗用量 |
-| `recorder.py:60-83` | `record_llm(..., context=...)`；`context` 含 `strategy/total/used/dropped/window_turns/summary` |
-| `recorder.py:85-116` | `record_summary()`：版本、覆盖条数、尝试次数、finish_reason、成本 |
-| `recorder.py:118-156` | `record_summary_error()`：失败也把 token 计入总成本 |
+| `cli/main.py:39-68` | `--context-strategy {full,window,summary,retrieval}`、窗口/摘要/检索参数 |
+| `cli/main.py:126-161` | 恢复时未显式指定则沿用断点，随后统一校验 |
+| `agent_loop.py:203-216` | `run()` 新增上下文、摘要、检索参数，未指定时沿用断点或默认值 |
+| `agent_loop.py:81-85` | `RunCheckpoint` 新增 5 个字段，保存于 `L184-187`，读取于 `L124-131` |
+| `agent_loop.py:292-347` | 请求前选策略：summary/retrieval/window/full；摘要失败降级 window |
+| `agent_loop.py:321` | `record_summary()` 计入摘要调用成本，先落断点再发主请求 |
+| `agent_loop.py:304` | `record_summary_error()` 记录失败事件与已消耗用量 |
+| `recorder.py:60-83` | `record_llm(..., context=...)`；`context` 含 `strategy/summary/retrieval/dropped_detail` |
 | `summary.py:27-38` | `SUMMARY_PROMPTS` 固定版本：`v1` 当前，`v0` 回滚 |
-| `summary.py:123-187` | `Summarizer.summarize()`：同 client、固定提示、按内容缓存、空正文翻倍重试 |
-| `summary.py:189-281` | `plan_summary_context()`：阈值判断、摘要插入位置、保留最近轮 |
+| `summary.py:186-278` | `plan_summary_context()`：阈值判断、摘要插入位置、保留最近轮 |
+| `retrieval.py:30-91` | `tokenize()` / `bm25_scores()`：英文词 + 中文二元组，标准 BM25 |
+| `retrieval.py:93-239` | `plan_retrieval_context()`：锚点/最近轮固定，其余按分数选到预算 |
 | `scripts/replay.py` | 打印上下文保留条数、摘要版本/覆盖/尝试次数与失败信息 |
 
 ### 10.3 评测与跑批
@@ -510,8 +509,12 @@ flowchart TD
 | `cases/context_cases.jsonl` | 50 条固定任务，四类 13/13/12/12，字段 `id/category/task/expect` |
 | `scripts/check_cases.py` | 校验条数、字段、类别合法、ID 唯一与均衡性 |
 | `scripts/run_cases.py` | 同一批任务按 `--strategy` 跑批，结果 JSONL 含 token/成本/步数/trace |
+| `scripts/analyze_matrix.py` | 合并 50×4 记录，算成功率、均值、P95，并输出失败证据 |
 | `tests/test_context.py` | 策略边界、工具配对、CLI 切换、恢复继承 |
 | `tests/test_summary.py` | 阈值触发、固定版本、缓存、空摘要重试、失败计费与降级 |
+| `tests/test_retrieval.py` | 分词、BM25 排序、预算选择、最近轮保留与 trace |
+| `tests/test_matrix.py` | 成功率、均值、P95、去重与字段校验 |
+| `tests/test_checkpoint.py` | `.tmp` 被占用时重试写断点 |
 | `tests/test_cases.py` | 冻结评测集的契约 |
 | `tests/test_run_cases.py` | 选择逻辑与 dry-run 不触发模型调用 |
 
@@ -521,7 +524,8 @@ flowchart TD
 run_cases.py --strategy full      → 每条用例一个 Tracer → 结果追加 JSONL
 run_cases.py --strategy window --window 2 → 同一批任务换装配策略，指标可横向比较
 run_cases.py --strategy summary --summary-threshold 3000 --summary-version v1
-                                  → 摘要策略与版本同样逐条记录
+run_cases.py --strategy retrieval --retrieval-budget 3000
+analyze_matrix.py --inputs "out/matrix_*.jsonl" → 200 条合并 + 五项指标 + badcase 证据
 ```
 
 ### 10.4 摘要版本与回滚
@@ -537,9 +541,36 @@ run_cases.py --strategy summary --summary-threshold 3000 --summary-version v1
 - 摘要失败后本任务内停用摘要并降级 `window`，避免反复为空摘要付费。
 - 摘要消息是 `system` 角色，插在锚点 system 之后、user 任务之前；只影响请求，不写回 `messages`。
 
-第 2 周的局限：窗口按"轮"而不是 token 预算裁剪；摘要按请求重算而非滚动摘要，
-长任务会多次调用；阈值是字符估算；`v0` 旧版提示在长上下文中更容易返回空正文。
-相关性排序留给 11-17 BM25；也没有控制关键信息在上下文中的相对位置。
+### 10.5 检索裁剪（BM25）
+
+- 分词不引依赖：英文/数字按词，中文按相邻二元组；查询取锚点内的 user 文本。
+- 标准 BM25（`k1=1.5`、`b=0.75`），文档粒度是"一轮"（assistant + 全部 tool 结果）。
+- 锚点与最近 `RETRIEVAL_KEEP_RECENT=1` 轮固定保留；其余按分数降序尝试，
+  `used + chars <= budget` 才选入，最后按原顺序拼回。
+- 预算连锚点+最近轮都不够时标记 `over_budget=True`，仍保留最近轮，保证对话连续。
+- trace 的 `context.retrieval` 记录预算、选中索引、候选分数；`dropped_detail` 额外带 BM25 分数。
+
+### 10.6 矩阵结果与默认策略
+
+50 条任务 × 4 策略 = 200 次运行，口径与原始记录见
+[day12](../experiments/2026-11-18-day12.md)：
+
+| 策略 | 成功率 | 平均输入 token | 平均成本（元） | 平均步数 | P95 延迟（s） |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `full` | 92.0% | 13,188 | 0.006808 | 4.08 | 47.01 |
+| `window` | 64.0% | 14,126 | 0.009948 | 5.96 | 42.26 |
+| `summary` | 74.0% | 21,279 | 0.016732 | 5.42 | 126.35 |
+| `retrieval` | 74.0% | 12,228 | 0.008613 | 5.82 | 58.93 |
+
+结论：本任务集上下文不大，裁剪省不下 token 却丢证据，`full` 同时赢成功率与成本。
+A1 默认策略保持 `full`，由 `context/config.py` 的 `DEFAULT_CONTEXT_STRATEGY` 统一控制，
+CLI、`run()`、`RunCheckpoint` 都读它；四种策略保留为按需入口。
+badcase 台账见 [day13](../experiments/2026-11-19-day13.md)，复盘见
+[day14](../experiments/2026-11-20-day14.md)。
+
+第 2 周的局限：窗口/检索按"轮"而不是 token 预算裁剪；摘要按请求重算而非滚动摘要；
+阈值/预算都是字符估算；BM25 没有停用词、同义词与 rerank，长工具输出内部无法再切段；
+也没有控制关键信息在上下文中的相对位置。
 
 ---
 
@@ -552,18 +583,20 @@ run_cases.py --strategy summary --summary-threshold 3000 --summary-version v1
 装配顺序      load_dotenv → 断点解析 → client → registry → tracer → prompt
               （.env 必须先于 client 构造，见 cli/main.py:57-65）
 
-上下文        --context-strategy {full,window,summary}（唯一开关）
-              ├─ plan_context()        context/strategies.py:42
-              │    window = system+首条user 锚点 + 最近 N 轮工具交互
-              └─ plan_summary_context() context/summary.py:189
-                   超阈值 → 同一模型按固定版本（v1/v0）摘要，可回滚
+上下文        --context-strategy {full,window,summary,retrieval}（唯一开关）
+              ├─ plan_context()          context/strategies.py:53
+              │    window = system+首条user 锚点 + 最近 N 轮
+              ├─ plan_summary_context()  context/summary.py:186
+              │    超阈值 → 同一模型按固定版本（v1/v0）摘要，可回滚
+              └─ plan_retrieval_context() context/retrieval.py:93
+                   BM25 选段到 --retrieval-budget，最近 1 轮固定保留
 
-主循环        loop.agent_loop.run()  agent_loop.py:185
-              ├─ 问模型   client.complete(plan.messages)  agent_loop.py:317
-              ├─ 执行     registry.invoke()               agent_loop.py:375
-              ├─ 回填     messages.append(tool)           agent_loop.py:379
+主循环        loop.agent_loop.run()  agent_loop.py:203
+              ├─ 问模型   client.complete(plan.messages)  agent_loop.py:349
+              ├─ 执行     registry.invoke()               agent_loop.py:407
+              ├─ 回填     messages.append(tool)           agent_loop.py:411
               └─ 判断停   finish / no_tool_call / no_new_info /
-                          provider_error / max_steps      agent_loop.py:390-398
+                          provider_error / max_steps      agent_loop.py:422-430
 
 四个工具      read_file / search_files / run_shell / finish
               tools/__init__.py:15-41

@@ -25,8 +25,9 @@ copy .env.example .env             # 填入 ARK_API_KEY、ARK_MODEL
 uv run python scripts/probe.py                                  # 连通性四项自检
 uv run python -m agent.cli --task "统计本仓库 TODO 与 FIXME 数量并列出前十条" --max-steps 12
 uv run python -m agent.cli --task "离线冒烟" --provider fake     # 无密钥时验证循环
-uv run python -m agent.cli --task "读 README 并总结" --context-strategy window --context-window 4
+uv run python -m agent.cli --task "读 README 并总结" --context-strategy window --context-window 2
 uv run python -m agent.cli --task "读 README 并总结" --context-strategy summary --summary-threshold 3000
+uv run python -m agent.cli --task "读 README 并总结" --context-strategy retrieval --retrieval-budget 3000
 uv run python -m agent.cli --resume traces\<run_id>.jsonl --max-steps 12 # 从中断处继续
 uv run pytest -q                                                # 单测
 uv run pytest --cov=agent --cov-report=term-missing -q           # 单测与覆盖率
@@ -48,13 +49,14 @@ trace 落在 `traces/<run_id>.jsonl`，每行一个事件（llm / tool / finish 
 
 ## 上下文策略（第 2 周）
 
-`--context-strategy` 一个参数切换三种装配方式，系统提示、工具 schema 与提示模板都不变：
+`--context-strategy` 一个参数切换四种装配方式，系统提示、工具 schema 与提示模板都不变：
 
 | 策略 | 行为 | 适用 |
 | --- | --- | --- |
 | `full`（默认） | 每次请求携带全部 `messages` | 历史短，需要完整证据链 |
-| `window` | 保留 system + 首条 user 作为锚点，再保留最近 `--context-window` 轮（默认 4）；更早的轮次整轮丢弃，工具调用与其结果不拆开 | 步数多，需要控制上下文预算 |
-| `summary` | 估算上下文字符数超过 `--summary-threshold`（默认 12000）时，把更早的轮次交给同一模型压缩，保留锚点、摘要与最近 2 轮；未超阈值等同 `full` | 多步任务需要压预算，同时尽量保留早期信息 |
+| `window` | 保留 system + 首条 user 作为锚点，再保留最近 `--context-window` 轮（默认 2）；更早的轮次整轮丢弃，工具调用与其结果不拆开 | 步数多，需要控制上下文预算 |
+| `summary` | 估算上下文字符数超过 `--summary-threshold`（默认 3000）时，把更早的轮次交给同一模型压缩，保留锚点、摘要与最近 2 轮；未超阈值等同 `full` | 多步任务需要压预算，同时尽量保留早期信息 |
+| `retrieval` | 锚点与最近 1 轮固定保留；其余轮次用 BM25 对任务查询打分，按分数选到 `--retrieval-budget`（默认 3000 字符）内 | 历史里只有少数片段与当前任务相关 |
 
 摘要的约束：
 
@@ -62,6 +64,11 @@ trace 落在 `traces/<run_id>.jsonl`，每行一个事件（llm / tool / finish 
 - 摘要用同一个 client/model、不挂工具；默认 `max_tokens=800`，空正文且 `finish_reason=length` 时翻倍重试一次（上限 2000），两次用量合并计费。
 - 摘要失败（上游异常或空输出）时本任务内停用摘要并降级为 `window`，记 `summary_error`；失败消耗的 token 也计入总成本。
 - 每条 `llm` 事件带 `context.summary`；另有 `summary` / `summary_error` 事件，记录版本、覆盖条数、尝试次数、`finish_reason` 与成本。
+- `retrieval` 用 BM25（英文词 + 中文二元组）按轮打分，`context.retrieval` 记录预算、选中索引与分数，
+  `context.dropped_detail` 记录被裁轮次的索引、工具名、字符数与 120 字预览。
+- 四种策略的参数集中在 `src/agent/context/config.py`，不在 CLI 或循环里散落默认值。
+- A1 默认策略由 `DEFAULT_CONTEXT_STRATEGY` 统一控制，当前为 `full`；第 2 周 50×4 矩阵的结论见
+  `docs/experiments/2026-11-18-day12.md` 与 `2026-11-20-day14.md`。
 
 三种策略都只裁剪"发给模型的消息"：`messages`、`.state.json` 断点与恢复逻辑仍保存全量；
 `--resume` 未显式指定策略/版本/阈值时沿用断点里的设置，避免恢复时悄悄改变实验条件。
@@ -73,10 +80,27 @@ trace 落在 `traces/<run_id>.jsonl`，每行一个事件（llm / tool / finish 
 校验条数、字段、类别均衡与 ID 唯一；`scripts/run_cases.py` 用同一批任务跑任一策略，
 结果逐条追加到 `out/context_results.jsonl`，含 token、成本、步数与 trace 路径。
 
+## 第 2 周结论（2026-11-20）
+
+50 条任务 × 4 策略的 200 次矩阵（见 [2026-11-18-day12.md](docs/experiments/2026-11-18-day12.md)）：
+
+| 策略 | 成功率 | 平均输入 token | 平均成本（元） | 平均步数 | P95 延迟（s） |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `full` | 92.0% | 13,188 | 0.006808 | 4.08 | 47.01 |
+| `window` | 64.0% | 14,126 | 0.009948 | 5.96 | 42.26 |
+| `summary` | 74.0% | 21,279 | 0.016732 | 5.42 | 126.35 |
+| `retrieval` | 74.0% | 12,228 | 0.008613 | 5.82 | 58.93 |
+
+本任务集的上下文多数不到 10k 字符，裁剪只丢掉后续仍需要的证据。A1 默认策略保持 `full`，
+并由 `DEFAULT_CONTEXT_STRATEGY` 集中配置；四种策略保留为按需入口。结论、badcase 与复盘见
+[2026-11-19-day13.md](docs/experiments/2026-11-19-day13.md)、
+[2026-11-20-day14.md](docs/experiments/2026-11-20-day14.md)。
+
 ## 当前阶段
 
-阶段一第 2 周：A1 最小闭环完成；A2 context-lab 的 `full` / `window` / `summary` 三种上下文策略已接入，
-50 条固定评测集已冻结，后续补 BM25 检索策略。
+阶段一第 2 周完成：A2 context-lab 的 `full` / `window` / `summary` / `retrieval` 四策略、
+50 条固定评测集、200 次矩阵与 badcase 台账均已落盘；A1 默认保持 `full`。
+下一周进入第 3 周服务端工程化（网关与流式）。
 
 ## 已知问题
 
@@ -88,8 +112,9 @@ trace 落在 `traces/<run_id>.jsonl`，每行一个事件（llm / tool / finish 
 - run_shell 输出上限 4000 字符，超出会标注"已截断"，长输出场景需自己缩小范围
 - 运行产物放 `out/`，trace 放 `traces/`，两者都已忽略且不被 search_files 扫描
 - `window` 只裁剪请求，断点仍保存全量历史，长任务的内存与 `.state.json` 体积不会下降
-- 滑窗按"轮"裁剪，不按 token 预算裁剪；预算控制留到摘要与检索策略
-- `summary` 的触发阈值是字符估算，不是真实 tokenizer；摘要按请求重算，不是滚动摘要，长任务会多次调用摘要
+- `window`/`retrieval` 按"轮"裁剪，不按 token 预算；摘要阈值与检索预算也是字符估算，不是真实 tokenizer
+- `retrieval` 的分词只有英文词 + 中文二元组，没有停用词、同义词与 rerank；长工具输出内部不能再切段
+- `summary` 按请求重算，不是滚动摘要，长任务会多次调用摘要
 - 摘要可能被 `max_tokens` 截断，trace 的 `finish_reason=length` 可筛出；`v0` 旧版提示在长上下文中更易返回空正文（实测触发重试与降级），回滚前需评估
 
 ## 目录
@@ -98,7 +123,7 @@ trace 落在 `traces/<run_id>.jsonl`，每行一个事件（llm / tool / finish 
 src/agent/llm/       模型适配：base 协议、doubao、fake
 src/agent/tools/     注册表与四个工具
 src/agent/loop/      循环与状态机
-src/agent/context/   上下文装配：full 全量、window 滑窗、summary 摘要
+src/agent/context/   上下文装配：full 全量、window 滑窗、summary 摘要、retrieval BM25
 src/agent/trace/     JSONL 落盘与成本计量
 src/agent/cli/       命令行入口
 cases/               50 条固定评测集与格式说明
