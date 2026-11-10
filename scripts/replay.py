@@ -84,6 +84,13 @@ def replay(path: Path) -> int:
             f"/{output_tokens if output_tokens is not None else '字段缺失：out'} | "
             f"成本={cost if cost is not None else '字段缺失：cost_yuan'} 元"
         )
+        context = llm.get("context")
+        if isinstance(context, dict):
+            print(
+                f"  上下文: {context.get('strategy')} "
+                f"保留 {context.get('used')}/{context.get('total')} 条，"
+                f"丢弃 {context.get('dropped')}"
+            )
         for tool in associated_tools:
             args = _required(tool, "arguments", missing)
             if args is None:

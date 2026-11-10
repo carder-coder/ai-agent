@@ -40,6 +40,7 @@ class Tracer:
         resumed_from: str | None = None,
         total_usage: Usage | None = None,
         total_cost: float = 0.0,
+        task: str | None = None,
     ) -> None:
         self.run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         self.path = path or Path("traces") / f"{self.run_id}.jsonl"
@@ -47,7 +48,7 @@ class Tracer:
         self._fh = self.path.open("a" if append else "w", encoding="utf-8", newline="\n")
         self.total_usage = total_usage or Usage()
         self.total_cost = total_cost
-        self.event("run_start", run_id=self.run_id, resumed_from=resumed_from)
+        self.event("run_start", run_id=self.run_id, resumed_from=resumed_from, task=task)
 
     def event(self, kind: str, **payload) -> dict:
         """写入并立即 flush 单条事件，降低运行中断时丢失 trace 的风险。"""
@@ -56,28 +57,30 @@ class Tracer:
         self._fh.flush()
         return rec
 
-    def record_llm(self, step: int, model: str, response) -> None:
-        """累计真实 usage，并记录延迟、重试、工具名和当前费率下的成本估算。"""
+    def record_llm(self, step: int, model: str, response, context: dict | None = None) -> None:
+        """累计真实 usage，并记录延迟、重试、工具名、上下文裁剪与当前费率下的成本。"""
         self.total_usage.add(response.usage)
         c = cost_yuan(response.usage)
         self.total_cost += c
-        self.event(
-            "llm",
-            step=step,
-            model=model,
-            first_byte_ms=response.first_byte_ms,
-            latency_ms=response.latency_ms,
-            finish_reason=response.finish_reason,
-            usage={
+        payload = {
+            "step": step,
+            "model": model,
+            "first_byte_ms": response.first_byte_ms,
+            "latency_ms": response.latency_ms,
+            "finish_reason": response.finish_reason,
+            "usage": {
                 "in": response.usage.input_tokens,
                 "out": response.usage.output_tokens,
                 "total": response.usage.total_tokens,
                 "cached": response.usage.cached_tokens,
             },
-            attempts=getattr(response, "attempts", 1),
-            cost_yuan=round(c, 6),
-            tool_calls=[c2.name for c2 in response.message.tool_calls],
-        )
+            "attempts": getattr(response, "attempts", 1),
+            "cost_yuan": round(c, 6),
+            "tool_calls": [c2.name for c2 in response.message.tool_calls],
+        }
+        if context is not None:
+            payload["context"] = context
+        self.event("llm", **payload)
 
     def record_tool(
         self,

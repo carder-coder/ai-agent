@@ -36,6 +36,18 @@ def main(argv: list[str] | None = None) -> int:
         default="detailed",
         help="系统提示版本，用于同任务对照",
     )
+    parser.add_argument(
+        "--context-strategy",
+        choices=["full", "window"],
+        default=None,
+        help="上下文策略：full 全量拼接；window 只保留最近若干轮。恢复时默认沿用断点",
+    )
+    parser.add_argument(
+        "--context-window",
+        type=int,
+        default=None,
+        help="window 策略保留的最近轮数（一轮=一次响应及其工具结果）",
+    )
     parser.add_argument("--root", default="", help="工具可访问的仓库根目录，默认当前目录")
     parser.add_argument("--quiet", action="store_true", help="只打印结论")
     args = parser.parse_args(argv)
@@ -86,8 +98,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if task is None:
         parser.error("无法从参数或断点获取任务描述")
+    # 断点恢复默认沿用原策略，避免一次 --resume 把 window 实验悄悄变回 full。
+    if args.context_strategy is None:
+        args.context_strategy = checkpoint.context_strategy if checkpoint else "full"
+    if args.context_window is None:
+        args.context_window = (
+            checkpoint.context_window
+            if checkpoint
+            else int(os.environ.get("AGENT_CONTEXT_WINDOW", 4))
+        )
     if args.max_steps < 1:
         parser.error("--max-steps 必须大于 0")
+    if args.context_window < 1:
+        parser.error("--context-window 必须大于 0")
 
     if args.provider == "doubao":
         try:
@@ -107,9 +130,10 @@ def main(argv: list[str] | None = None) -> int:
             resumed_from=str(resume_source),
             total_usage=checkpoint.usage,
             total_cost=checkpoint.total_cost_yuan,
+            task=task,
         )
     else:
-        tracer = Tracer()
+        tracer = Tracer(task=task)
     prompt = CONCISE_SYSTEM_PROMPT if args.prompt_variant == "concise" else SYSTEM_PROMPT
     try:
         result = run(
@@ -120,6 +144,8 @@ def main(argv: list[str] | None = None) -> int:
             max_steps=args.max_steps,
             system_prompt=prompt,
             checkpoint=checkpoint,
+            context_strategy=args.context_strategy,
+            context_window=args.context_window,
         )
     except KeyboardInterrupt:
         state_path = tracer.path.with_suffix(".state.json")
@@ -131,6 +157,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.quiet:
         print(f"[provider] {client.name}/{client.model}")
         print(f"[steps] {result.steps}（{result.stop_reason}）")
+        if args.context_strategy == "window":
+            print(f"[context] window（最近 {args.context_window} 轮）")
+        else:
+            print("[context] full（全量拼接）")
         print(
             f"[tokens] 输入 {result.usage.input_tokens} / 输出 {result.usage.output_tokens}"
             f" / 合计 {result.usage.total_tokens}（缓存命中 {result.usage.cached_tokens}）"

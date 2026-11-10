@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..context import DEFAULT_WINDOW_TURNS, STRATEGIES, plan_context
 from ..llm import LLMClient, Message, ProviderError, ToolCall, Usage
 from ..tools import FINISH_TOOL, ToolRegistry
 from ..trace import Tracer, cost_yuan
@@ -62,6 +63,8 @@ class RunCheckpoint:
     last_key: tuple[str, str] | None = None
     repeats: int = 0
     status: str = "in_progress"
+    context_strategy: str = "full"
+    context_window: int = DEFAULT_WINDOW_TURNS
 
     @classmethod
     def load(cls, path: Path) -> RunCheckpoint:
@@ -93,6 +96,12 @@ class RunCheckpoint:
             ]
             last_key_data = data.get("last_key")
             last_key = tuple(last_key_data) if last_key_data else None
+            context_strategy = data.get("context_strategy", "full")
+            if context_strategy not in STRATEGIES:
+                raise ValueError(f"不支持的上下文策略：{context_strategy}")
+            context_window = int(data.get("context_window", DEFAULT_WINDOW_TURNS))
+            if context_window < 1:
+                raise ValueError(f"上下文窗口必须大于 0：{context_window}")
             checkpoint = cls(
                 run_id=data["run_id"],
                 trace_path=data["trace_path"],
@@ -107,6 +116,8 @@ class RunCheckpoint:
                 last_key=last_key,
                 repeats=int(data.get("repeats", 0)),
                 status=data.get("status", "in_progress"),
+                context_strategy=context_strategy,
+                context_window=context_window,
             )
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError(f"断点状态无效：{path}: {exc}") from exc
@@ -139,6 +150,8 @@ class RunCheckpoint:
             "last_key": list(self.last_key) if self.last_key else None,
             "repeats": self.repeats,
             "status": self.status,
+            "context_strategy": self.context_strategy,
+            "context_window": self.context_window,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(path.name + ".tmp")
@@ -154,8 +167,18 @@ def run(
     max_steps: int = MAX_STEPS_DEFAULT,
     system_prompt: str = SYSTEM_PROMPT,
     checkpoint: RunCheckpoint | None = None,
+    context_strategy: str | None = None,
+    context_window: int | None = None,
 ) -> RunResult:
-    """运行最多 max_steps 轮的工具循环，并在每次模型/工具交互时写 trace。"""
+    """运行最多 max_steps 轮的工具循环，并在每次模型/工具交互时写 trace。
+
+    context_strategy 只影响每次请求携带的消息；messages 始终保存全量对话，
+    因此断点恢复、重复检测和工具回填不受策略影响。未显式指定时沿用断点设置。
+    """
+    if context_strategy is None:
+        context_strategy = checkpoint.context_strategy if checkpoint else "full"
+    if context_window is None:
+        context_window = checkpoint.context_window if checkpoint else DEFAULT_WINDOW_TURNS
     messages = checkpoint.messages if checkpoint else [
         Message(role="system", content=system_prompt),
         Message(role="user", content=task),
@@ -186,6 +209,8 @@ def run(
             last_key=last_key,
             repeats=repeats,
             status=status,
+            context_strategy=context_strategy,
+            context_window=context_window,
         )
         state.save(checkpoint_path)
 
@@ -198,8 +223,13 @@ def run(
             # 请求开始前落点；此时中断可安全地重发尚未得到响应的模型请求。
             next_step = step
             save_checkpoint()
+            plan = plan_context(
+                messages,
+                strategy=context_strategy,
+                window_turns=context_window,
+            )
             try:
-                resp = client.complete(messages, tools=schemas)
+                resp = client.complete(plan.messages, tools=schemas)
             except ProviderError as exc:
                 answer = f"上游不可用：{exc}"
                 stop_reason = "provider_error"
@@ -207,7 +237,12 @@ def run(
                 save_checkpoint(status=stop_reason)
                 break
 
-            tracer.record_llm(step, getattr(client, "model", "unknown"), resp)
+            tracer.record_llm(
+                step,
+                getattr(client, "model", "unknown"),
+                resp,
+                context=plan.to_trace(),
+            )
             messages.append(resp.message)
             pending_calls = list(resp.message.tool_calls)
             next_call_index = 0
