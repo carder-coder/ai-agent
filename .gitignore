@@ -5,10 +5,12 @@
 
 # 运行产物
 traces/
+traces_v2/
 out/
 *.log
 .logs/
 eval_output/
+pytest-of-*/
 
 # Python
 __pycache__/

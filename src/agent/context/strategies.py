@@ -1,7 +1,11 @@
 """两种上下文装配策略：full 全量拼接，window 只保留最近若干轮工具交互。
 
 这里只决定"本次请求发给模型哪些消息"，不修改 run() 保存的完整对话。
-因此断点恢复仍基于全量 messages，滑窗只影响提示内容。摘要策略见 summary.py。
+因此断点恢复仍基于全量 messages，滑窗只影响提示内容。摘要策略见 summary.py，
+检索策略见 retrieval.py。
+
+plan_context 只负责 full/window；summary/retrieval 有各自入口，传错会显式报错，
+不允许静默退化成 window（那会让实验臂的标签失真）。
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ from ._layout import (
     drop_orphan_tools,
     split_turns,
 )
-from .config import DEFAULT_WINDOW_TURNS, STRATEGIES
+from .config import DEFAULT_WINDOW_TURNS
 
 
 @dataclass
@@ -70,8 +74,11 @@ def plan_context(
             used_messages=total,
             dropped_messages=0,
         )
-    if strategy not in STRATEGIES:
-        raise ValueError(f"未知上下文策略：{strategy}（可选：{'、'.join(STRATEGIES)}）")
+    if strategy not in {"window"}:
+        raise ValueError(
+            f"plan_context 只处理 full/window，收到 {strategy}；"
+            "summary/retrieval 请调用 plan_summary_context / plan_retrieval_context"
+        )
     if window_turns < 1:
         raise ValueError(f"window_turns 必须大于 0，收到 {window_turns}")
 

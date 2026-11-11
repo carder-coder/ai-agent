@@ -154,9 +154,12 @@ def test_context_plan_serializes_for_trace() -> None:
     assert [item["index"] for item in trace["dropped_detail"]] == [0, 1]
 
 
-@pytest.mark.parametrize(("strategy", "window"), [("window", 0), ("bogus", 4)])
+@pytest.mark.parametrize(
+    ("strategy", "window"),
+    [("window", 0), ("bogus", 4), ("summary", 4), ("retrieval", 4)],
+)
 def test_invalid_context_settings_raise(strategy: str, window: int) -> None:
-    """非法策略或非正窗口必须显式报错，而不是静默退化。"""
+    """非法策略、非正窗口、以及传给 plan_context 的专用策略都必须显式报错。"""
     with pytest.raises(ValueError):
         plan_context(_conversation(2), strategy, window)
 

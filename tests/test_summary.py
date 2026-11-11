@@ -377,6 +377,8 @@ def test_summary_failure_falls_back_to_window(tmp_path: Path) -> None:
 
     assert result.stop_reason == "finished"
     assert [len(messages) for messages in client.main_seen] == [2, 4, 6, 6, 6]
+    assert result.context["degraded_to"] == "window"
+    assert result.context["summary_error_steps"] == 1
 
     events = [json.loads(line) for line in tracer.path.read_text(encoding="utf-8").splitlines()]
     summary_errors = [event for event in events if event["kind"] == "summary_error"]

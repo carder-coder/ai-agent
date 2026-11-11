@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         "--retrieval-budget",
         type=int,
         default=None,
-        help="检索策略的上下文字符预算；恢复时默认沿用断点",
+        help="retrieval 策略的上下文 token 预算；恢复时默认沿用断点",
     )
     parser.add_argument("--root", default="", help="工具可访问的仓库根目录，默认当前目录")
     parser.add_argument("--quiet", action="store_true", help="只打印结论")
@@ -78,7 +78,8 @@ def main(argv: list[str] | None = None) -> int:
     from ..context import (
         DEFAULT_CONTEXT_STRATEGY,
         DEFAULT_SUMMARY_VERSION,
-        RETRIEVAL_BUDGET_CHARS,
+        DEFAULT_WINDOW_TURNS,
+        RETRIEVAL_BUDGET_TOKENS,
         SUMMARY_PROMPTS,
         SUMMARY_TRIGGER_CHARS,
     )
@@ -129,9 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.context_window is None:
         args.context_window = (
-            checkpoint.context_window
-            if checkpoint
-            else int(os.environ.get("AGENT_CONTEXT_WINDOW", 4))
+            checkpoint.context_window if checkpoint else DEFAULT_WINDOW_TURNS
         )
     if args.summary_version is None:
         args.summary_version = (
@@ -147,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         args.retrieval_budget = (
             checkpoint.retrieval_budget
             if checkpoint
-            else int(os.environ.get("AGENT_RETRIEVAL_BUDGET", RETRIEVAL_BUDGET_CHARS))
+            else int(os.environ.get("AGENT_RETRIEVAL_BUDGET", RETRIEVAL_BUDGET_TOKENS))
         )
     if args.max_steps < 1:
         parser.error("--max-steps 必须大于 0")
@@ -214,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"提示 {args.summary_version}）"
             )
         elif args.context_strategy == "retrieval":
-            print(f"[context] retrieval（预算 {args.retrieval_budget} 字符）")
+            print(f"[context] retrieval（预算 {args.retrieval_budget} token）")
         elif args.context_strategy == "window":
             print(f"[context] window（最近 {args.context_window} 轮）")
         else:

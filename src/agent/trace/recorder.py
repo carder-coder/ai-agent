@@ -48,6 +48,9 @@ class Tracer:
         self._fh = self.path.open("a" if append else "w", encoding="utf-8", newline="\n")
         self.total_usage = total_usage or Usage()
         self.total_cost = total_cost
+        # 摘要/失败摘要的用量单列，便于把"主请求输入"与"附加调用输入"拆开统计。
+        self.summary_usage = Usage()
+        self.request_latencies_ms: list[int] = []
         self.event("run_start", run_id=self.run_id, resumed_from=resumed_from, task=task)
 
     def event(self, kind: str, **payload) -> dict:
@@ -60,6 +63,8 @@ class Tracer:
     def record_llm(self, step: int, model: str, response, context: dict | None = None) -> None:
         """累计真实 usage，并记录延迟、重试、工具名、上下文裁剪与当前费率下的成本。"""
         self.total_usage.add(response.usage)
+        if response.latency_ms:
+            self.request_latencies_ms.append(response.latency_ms)
         c = cost_yuan(response.usage)
         self.total_cost += c
         payload = {
@@ -94,6 +99,7 @@ class Tracer:
     ) -> None:
         """记录一次真实摘要调用：计入总用量与成本，并保留有限预览。"""
         self.total_usage.add(response.usage)
+        self.summary_usage.add(response.usage)
         c = cost_yuan(response.usage)
         self.total_cost += c
         self.event(
@@ -130,6 +136,7 @@ class Tracer:
         c = 0.0
         if usage.total_tokens:
             self.total_usage.add(usage)
+            self.summary_usage.add(usage)
             c = cost_yuan(usage)
             self.total_cost += c
         self.event(

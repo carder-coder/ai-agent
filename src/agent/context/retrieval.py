@@ -1,4 +1,8 @@
-"""BM25 检索裁剪：按任务相关性给每轮打分，按分数选段直到字符预算。"""
+"""BM25 检索裁剪：按任务相关性给每轮打分，按 token 预算选段，必要时截断片段。
+
+预算按 token 估算；锚点固定，最近轮最多占 60%，至少留 40% 给按分数选出的旧轮次。
+候选轮次整轮放不下时，允许把工具输出截到剩余预算，而不是直接丢掉整轮证据。
+"""
 
 from __future__ import annotations
 
@@ -11,15 +15,18 @@ from ._layout import (
     anchor_end,
     describe_turn,
     drop_orphan_tools,
-    estimate_context_chars,
+    estimate_context_tokens,
     split_turns,
+    truncate_turn,
 )
 from .config import (
     BM25_B,
     BM25_K1,
-    RETRIEVAL_BUDGET_CHARS,
+    RETRIEVAL_BUDGET_TOKENS,
     RETRIEVAL_KEEP_RECENT,
     RETRIEVAL_MAX_DROPPED_DETAIL,
+    RETRIEVAL_MIN_SEGMENT_TOKENS,
+    RETRIEVAL_RECENT_RATIO,
 )
 from .strategies import ContextPlan
 
@@ -90,36 +97,134 @@ def _query_text(messages: list[Message], anchor: int) -> str:
     )
 
 
+def _allocate(sizes: list[int], total: int, floor: int) -> list[int]:
+    """在总量 total 内按大小比例分配，每项不低于 floor。"""
+    if not sizes:
+        return []
+    base = [min(size, floor) for size in sizes]
+    if sum(base) >= total:
+        return base
+    extra_total = total - sum(base)
+    remaining = [max(size - floor, 0) for size in sizes]
+    weight = sum(remaining)
+    if weight <= 0:
+        return base
+    allocation = list(base)
+    for index, weight_item in enumerate(remaining):
+        allocation[index] += int(extra_total * weight_item / weight)
+    return allocation
+
+
+def _count_truncated(original: list[Message], fitted: list[Message]) -> int:
+    return sum(
+        1
+        for before, after in zip(original, fitted, strict=True)
+        if before.content and after.content and before.content != after.content
+    )
+
+
+def _fit_recent(
+    recent: list[list[Message]],
+    cap_tokens: int,
+    min_segment_tokens: int,
+) -> tuple[list[list[Message]], int, int, int]:
+    """把最近若干轮压到 cap 内；返回（拟合后的轮次，截断轮数，截断消息数，无法压缩轮数）。"""
+    sizes = [estimate_context_tokens(turn) for turn in recent]
+    if sum(sizes) <= cap_tokens:
+        return recent, 0, 0, 0
+    allocation = _allocate(sizes, cap_tokens, min_segment_tokens)
+    fitted: list[list[Message]] = []
+    truncated_turns = 0
+    truncated_messages = 0
+    untruncatable = 0
+    for turn, size, limit in zip(recent, sizes, allocation, strict=True):
+        if size <= limit:
+            fitted.append(turn)
+            continue
+        shrunk = truncate_turn(turn, limit)
+        if shrunk is None:
+            fitted.append(turn)
+            untruncatable += 1
+            continue
+        truncated_turns += 1
+        truncated_messages += _count_truncated(turn, shrunk)
+        fitted.append(shrunk)
+    return fitted, truncated_turns, truncated_messages, untruncatable
+
+
 def plan_retrieval_context(
     messages: list[Message],
     *,
-    budget_chars: int = RETRIEVAL_BUDGET_CHARS,
+    budget_tokens: int = RETRIEVAL_BUDGET_TOKENS,
+    tools_tokens: int = 0,
     keep_recent: int = RETRIEVAL_KEEP_RECENT,
+    min_segment_tokens: int = RETRIEVAL_MIN_SEGMENT_TOKENS,
+    recent_ratio: float = RETRIEVAL_RECENT_RATIO,
     k1: float = BM25_K1,
     b: float = BM25_B,
 ) -> ContextPlan:
-    """锚点与最近轮固定保留，其余轮次按 BM25 分数选到字符预算内。"""
-    if budget_chars < 1:
-        raise ValueError(f"budget_chars 必须大于 0，收到 {budget_chars}")
+    """锚点固定；最近轮按配额保留并允许截断；旧轮按 BM25 分数选到 token 预算内。"""
+    if budget_tokens < 1:
+        raise ValueError(f"budget_tokens 必须大于 0，收到 {budget_tokens}")
+    if tools_tokens < 0:
+        raise ValueError(f"tools_tokens 不能为负，收到 {tools_tokens}")
+    message_budget = max(1, budget_tokens - tools_tokens)
     if keep_recent < 1:
         raise ValueError(f"keep_recent 必须大于 0，收到 {keep_recent}")
+    if min_segment_tokens < 1:
+        raise ValueError(f"min_segment_tokens 必须大于 0，收到 {min_segment_tokens}")
+    if not 0 < recent_ratio < 1:
+        raise ValueError(f"recent_ratio 必须在 (0,1) 内，收到 {recent_ratio}")
 
     total = len(messages)
     anchor = anchor_end(messages)
     turns = split_turns(messages, anchor)
+    before_tokens = estimate_context_tokens(messages)
     retrieval_trace: dict = {
-        "budget": budget_chars,
+        "budget_tokens": budget_tokens,
+        "tools_tokens": tools_tokens,
+        "message_budget": message_budget,
         "keep_recent": keep_recent,
-        "chars": estimate_context_chars(messages),
+        "min_segment_tokens": min_segment_tokens,
+        "recent_ratio": recent_ratio,
+        "tokens_before": before_tokens,
     }
     if len(turns) <= 1:
-        retrieval_trace["reason"] = "no_old_turns"
+        # 没有可打分的旧轮时仍要守住预算：最近一轮自己太大就截断它的正文，
+        # 否则首步/第二步的大工具输出会直接冲爆预算（旧实现只标记 over_budget）。
+        anchor_tokens = estimate_context_tokens(messages[:anchor])
+        recent = turns[-1:] if turns else []
+        truncated_turns = truncated_messages = untruncatable = 0
+        tokens_after = before_tokens
+        kept = list(messages)
+        if recent and before_tokens > message_budget:
+            cap = max(1, message_budget - anchor_tokens)
+            fitted, truncated_turns, truncated_messages, untruncatable = _fit_recent(
+                recent, cap, min_segment_tokens
+            )
+            kept = list(messages[:anchor])
+            for turn in fitted:
+                kept.extend(turn)
+            kept = drop_orphan_tools(kept)
+            tokens_after = estimate_context_tokens(kept)
+        retrieval_trace.update(
+            {
+                "reason": "no_old_turns",
+                "tokens_after": tokens_after,
+                "request_tokens_est": tokens_after + tools_tokens,
+                "used_tokens": tokens_after,
+                "truncated_turns": truncated_turns,
+                "truncated_messages": truncated_messages,
+                "untruncatable_turns": untruncatable,
+                "over_budget": tokens_after + tools_tokens > budget_tokens,
+            }
+        )
         return ContextPlan(
             strategy="retrieval",
-            messages=list(messages),
+            messages=kept,
             total_messages=total,
-            used_messages=total,
-            dropped_messages=0,
+            used_messages=len(kept),
+            dropped_messages=total - len(kept),
             retrieval=retrieval_trace,
         )
 
@@ -135,14 +240,35 @@ def plan_retrieval_context(
     )
     score_by_index = {index: score for (index, _), score in ranked}
 
-    used = estimate_context_chars(messages[:anchor])
-    used += sum(estimate_context_chars(turn) for turn in recent)
+    anchor_tokens = estimate_context_tokens(messages[:anchor])
+    # 至少留 40% 消息预算给按分数选出的旧轮，避免最近轮把预算吃光后退化成滑窗。
+    reserve_for_old = int(message_budget * (1 - recent_ratio)) if candidates else 0
+    recent_cap = max(
+        RETRIEVAL_MIN_SEGMENT_TOKENS * len(recent),
+        message_budget - anchor_tokens - reserve_for_old,
+    )
+    recent, recent_trunc_turns, recent_trunc_messages, untruncatable = _fit_recent(
+        recent, recent_cap, min_segment_tokens
+    )
+    used = anchor_tokens + sum(estimate_context_tokens(turn) for turn in recent)
+
     selected: list[tuple[int, list[Message]]] = []
+    truncated_turns = recent_trunc_turns
+    truncated_messages = recent_trunc_messages
     for (index, turn), _score in ranked:
-        cost = estimate_context_chars(turn)
-        if used + cost <= budget_chars:
+        remaining = message_budget - used
+        cost = estimate_context_tokens(turn)
+        if cost <= remaining:
             selected.append((index, turn))
             used += cost
+        elif remaining >= min_segment_tokens:
+            shrunk = truncate_turn(turn, remaining)
+            if shrunk is None:
+                continue
+            selected.append((index, shrunk))
+            truncated_turns += 1
+            truncated_messages += _count_truncated(turn, shrunk)
+            used += estimate_context_tokens(shrunk)
     selected.sort(key=lambda item: item[0])
     selected_indexes = {index for index, _ in selected}
 
@@ -164,6 +290,7 @@ def plan_retrieval_context(
         item["score"] = round(score_by_index.get(index, 0.0), 3)
         detail.append(item)
 
+    after_tokens = estimate_context_tokens(kept)
     retrieval_trace.update(
         {
             "enabled": True,
@@ -171,10 +298,16 @@ def plan_retrieval_context(
             "scored_turns": len(candidates),
             "selected": len(selected),
             "dropped": len(dropped),
-            "chars_after": estimate_context_chars(kept),
+            "used_tokens": after_tokens,
+            "tokens_after": after_tokens,
+            "request_tokens_est": after_tokens + tools_tokens,
             "selected_indexes": [index for index, _ in selected],
             "scores": {str(index): round(score, 3) for index, score in score_by_index.items()},
-            "over_budget": estimate_context_chars(kept) > budget_chars,
+            "truncated_turns": truncated_turns,
+            "truncated_messages": truncated_messages,
+            "untruncatable_turns": untruncatable,
+            "over_budget": after_tokens + tools_tokens > budget_tokens,
+            "reason": "anchor_over_budget" if anchor_tokens > message_budget else None,
         }
     )
     return ContextPlan(

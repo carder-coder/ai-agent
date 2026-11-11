@@ -12,12 +12,13 @@ from ..context import (
     DEFAULT_CONTEXT_STRATEGY,
     DEFAULT_SUMMARY_VERSION,
     DEFAULT_WINDOW_TURNS,
-    RETRIEVAL_BUDGET_CHARS,
+    RETRIEVAL_BUDGET_TOKENS,
     RETRIEVAL_KEEP_RECENT,
     STRATEGIES,
     SUMMARY_KEEP_TURNS,
     SUMMARY_PROMPTS,
     SUMMARY_TRIGGER_CHARS,
+    TOOL_SCHEMA_TOKENS,
     Summarizer,
     SummaryError,
     plan_context,
@@ -60,6 +61,8 @@ class RunResult:
     usage: Usage = field(default_factory=Usage)
     cost_yuan: float = 0.0
     trace_path: str = ""
+    # 上下文处理统计：是否降级、真正裁剪/超预算的步数，供结果层分层分析。
+    context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -83,7 +86,7 @@ class RunCheckpoint:
     context_window: int = DEFAULT_WINDOW_TURNS
     summary_version: str = DEFAULT_SUMMARY_VERSION
     summary_threshold: int = SUMMARY_TRIGGER_CHARS
-    retrieval_budget: int = RETRIEVAL_BUDGET_CHARS
+    retrieval_budget: int = RETRIEVAL_BUDGET_TOKENS
 
     @classmethod
     def load(cls, path: Path) -> RunCheckpoint:
@@ -127,9 +130,16 @@ class RunCheckpoint:
             summary_threshold = int(data.get("summary_threshold", SUMMARY_TRIGGER_CHARS))
             if summary_threshold < 1:
                 raise ValueError(f"摘要阈值必须大于 0：{summary_threshold}")
-            retrieval_budget = int(data.get("retrieval_budget", RETRIEVAL_BUDGET_CHARS))
+            retrieval_budget = int(data.get("retrieval_budget", RETRIEVAL_BUDGET_TOKENS))
             if retrieval_budget < 1:
                 raise ValueError(f"检索预算必须大于 0：{retrieval_budget}")
+            # 旧断点的检索预算按字符存；口径改成 token 后不能静默续跑，避免实验条件漂移。
+            if context_strategy == "retrieval" and data.get("budget_unit") != "tokens":
+                raise ValueError(
+                    "断点来自字符预算版本（缺少 budget_unit=tokens）："
+                    "检索预算已改为 token 口径，请重新开始该用例；"
+                    "如需续跑请显式 --context-strategy full/window/summary"
+                )
             checkpoint = cls(
                 run_id=data["run_id"],
                 trace_path=data["trace_path"],
@@ -186,6 +196,7 @@ class RunCheckpoint:
             "summary_version": self.summary_version,
             "summary_threshold": self.summary_threshold,
             "retrieval_budget": self.retrieval_budget,
+            "budget_unit": "tokens",
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(path.name + ".tmp")
@@ -238,7 +249,7 @@ def run(
         raise ValueError(f"摘要阈值必须大于 0，收到 {summary_threshold}")
     if retrieval_budget is None:
         retrieval_budget = (
-            checkpoint.retrieval_budget if checkpoint else RETRIEVAL_BUDGET_CHARS
+            checkpoint.retrieval_budget if checkpoint else RETRIEVAL_BUDGET_TOKENS
         )
     if retrieval_budget < 1:
         raise ValueError(f"检索预算必须大于 0，收到 {retrieval_budget}")
@@ -259,6 +270,13 @@ def run(
     answer = ""
     stop_reason = "max_steps"
     checkpoint_path = tracer.path.with_suffix(".state.json")
+    context_stats: dict[str, Any] = {
+        "degraded_to": None,
+        "trimmed_steps": 0,
+        "summary_enabled_steps": 0,
+        "summary_error_steps": 0,
+        "over_budget_steps": 0,
+    }
 
     def save_checkpoint(status: str = "in_progress") -> None:
         state = RunCheckpoint(
@@ -303,7 +321,10 @@ def run(
                     )
                 except (ProviderError, SummaryError) as exc:
                     # 摘要失败不终止任务：本任务内停用摘要并降级为滑窗。
+                    # 降级要落结果层，否则 summary 臂会混进 window 的成绩。
                     summarizer.disable(str(exc))
+                    context_stats["summary_error_steps"] += 1
+                    context_stats["degraded_to"] = "window"
                     tracer.record_summary_error(
                         step,
                         getattr(client, "model", "unknown"),
@@ -339,7 +360,8 @@ def run(
             elif context_strategy == "retrieval":
                 plan = plan_retrieval_context(
                     messages,
-                    budget_chars=retrieval_budget,
+                    budget_tokens=retrieval_budget,
+                    tools_tokens=TOOL_SCHEMA_TOKENS if schemas else 0,
                     keep_recent=RETRIEVAL_KEEP_RECENT,
                 )
             else:
@@ -348,6 +370,13 @@ def run(
                     strategy=context_strategy,
                     window_turns=context_window,
                 )
+            plan_trace = plan.to_trace()
+            if int(plan_trace.get("dropped") or 0) > 0:
+                context_stats["trimmed_steps"] += 1
+            if (plan_trace.get("summary") or {}).get("enabled"):
+                context_stats["summary_enabled_steps"] += 1
+            if (plan_trace.get("retrieval") or {}).get("over_budget"):
+                context_stats["over_budget_steps"] += 1
             try:
                 resp = client.complete(plan.messages, tools=schemas)
             except ProviderError as exc:
@@ -361,7 +390,7 @@ def run(
                 step,
                 getattr(client, "model", "unknown"),
                 resp,
-                context=plan.to_trace(),
+                context=plan_trace,
             )
             messages.append(resp.message)
             pending_calls = list(resp.message.tool_calls)
@@ -443,4 +472,5 @@ def run(
         usage=result_usage,
         cost_yuan=cost_yuan(result_usage),
         trace_path=str(tracer.path),
+        context=context_stats,
     )

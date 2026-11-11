@@ -79,8 +79,9 @@ def test_summarize_computes_five_metrics() -> None:
 def test_markdown_table_has_all_columns() -> None:
     table = markdown_table(summarize([_record("full", "finished", "a")]))
 
-    assert "| 策略 | 样本 | 成功率 |" in table
-    assert "| full | 1 | 100.0% (1/1) |" in table
+    assert "| 策略 | 样本 | 完成率 | 拒绝正确率 | 主请求输入 token |" in table
+    assert "| full | 1 | 100.0% (1/1) | n/a | 100 | 0 |" in table
+    assert "单次请求 P95（s）" in table
 
 
 def test_load_records_deduplicates_same_combo(tmp_path: Path) -> None:
@@ -98,8 +99,22 @@ def test_validate_reports_missing_field_and_count() -> None:
     problems = validate(records, expected=4)
 
     assert any("记录数应为 4" in problem for problem in problems)
+    assert any("策略应为" in problem for problem in problems)
 
     broken = _record("full", "finished", "")
     broken.pop("cost_yuan")
     problems = validate([broken], expected=1)
     assert any("cost_yuan" in problem for problem in problems)
+
+
+def test_validate_requires_every_case_to_have_all_strategies() -> None:
+    records = [
+        _record("full", "finished", "a", case_id="c1"),
+        _record("window", "finished", "a", case_id="c1"),
+        _record("summary", "finished", "a", case_id="c1"),
+        _record("retrieval", "finished", "a", case_id="c1"),
+        _record("full", "finished", "a", case_id="c2"),
+    ]
+    problems = validate(records, expected=8)
+
+    assert any("缺策略" in problem for problem in problems)

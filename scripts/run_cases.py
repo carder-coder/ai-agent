@@ -1,6 +1,6 @@
 """按固定用例集批量运行 agent，一条 --strategy 切换全量拼接与滑窗。
 
-每条结果追加写入 JSONL（`--fresh` 清空重写），包含成功率分析所需的 token、成本、步数与 trace 路径。
+每条结果追加写入 JSONL（`--fresh` 清空重写），包含完成率分析所需的 token、成本、步数与 trace 路径。
 默认只跑用例集；先用 --dry-run 核对选择范围，再用 --sample-per-category 做小批冒烟。
 
 用法：
@@ -26,12 +26,13 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from check_cases import CATEGORIES, load_cases  # noqa: E402 同目录脚本复用加载逻辑
+from metrics import enrich_record, is_success, load_refusal_rules  # noqa: E402
 
 from agent.cli.main import load_dotenv  # noqa: E402
 from agent.context import (  # noqa: E402
     DEFAULT_SUMMARY_VERSION,
     DEFAULT_WINDOW_TURNS,
-    RETRIEVAL_BUDGET_CHARS,
+    RETRIEVAL_BUDGET_TOKENS,
     STRATEGIES,
     SUMMARY_TRIGGER_CHARS,
 )
@@ -100,8 +101,8 @@ def main() -> int:
     parser.add_argument(
         "--retrieval-budget",
         type=int,
-        default=RETRIEVAL_BUDGET_CHARS,
-        help="retrieval 策略的上下文字符预算",
+        default=RETRIEVAL_BUDGET_TOKENS,
+        help="retrieval 策略的上下文 token 预算",
     )
     parser.add_argument("--provider", choices=["doubao", "fake"], default="doubao")
     parser.add_argument("--max-steps", type=int, default=12)
@@ -142,6 +143,7 @@ def main() -> int:
         cases = [case for case in cases if case["id"] in wanted]
     if not cases:
         parser.error("没有选中任何用例")
+    refusal_rules = load_refusal_rules()
 
     if args.dry_run:
         for case in cases:
@@ -208,7 +210,7 @@ def main() -> int:
                     ),
                     "provider": args.provider,
                     "stop_reason": result.stop_reason,
-                    "ok": result.stop_reason == "finished",
+                    "ok": is_success(result.stop_reason, result.answer),
                     "steps": result.steps,
                     "input_tokens": result.usage.input_tokens,
                     "output_tokens": result.usage.output_tokens,
@@ -218,6 +220,7 @@ def main() -> int:
                     "elapsed_s": elapsed_s,
                     "trace": str(Path(result.trace_path).resolve()),
                     "answer": result.answer,
+                    "context": result.context,
                 }
             except KeyboardInterrupt:
                 tracer.abort(error="KeyboardInterrupt")
@@ -256,6 +259,10 @@ def main() -> int:
                     "error": f"{type(exc).__name__}: {exc}",
                 }
 
+            # 从 trace 复算主请求/附加调用 token、单次请求 P95 与裁剪状态，
+            # 结果文件自带分析所需字段，不必回读 trace。
+            enrich_record(record, rules=refusal_rules)
+
             sink.write(json.dumps(record, ensure_ascii=False) + "\n")
             sink.flush()
             records.append(record)
@@ -275,7 +282,7 @@ def main() -> int:
     elif args.strategy == "summary":
         strategy_note = f"（阈值 {args.summary_threshold} 字符，提示 {args.summary_version}）"
     elif args.strategy == "retrieval":
-        strategy_note = f"（预算 {args.retrieval_budget} 字符）"
+        strategy_note = f"（预算 {args.retrieval_budget} token）"
     else:
         strategy_note = ""
     print(f"策略: {args.strategy}{strategy_note}")

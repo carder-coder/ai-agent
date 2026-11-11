@@ -8,13 +8,21 @@ from pathlib import Path
 import pytest
 
 from agent.context import (
-    RETRIEVAL_BUDGET_CHARS,
+    RETRIEVAL_BUDGET_TOKENS,
     RETRIEVAL_KEEP_RECENT,
+    RETRIEVAL_MIN_SEGMENT_TOKENS,
     bm25_scores,
     plan_retrieval_context,
     tokenize,
 )
-from agent.context._layout import anchor_end, estimate_context_chars, split_turns
+from agent.context._layout import (
+    anchor_end,
+    count_tokens,
+    estimate_context_tokens,
+    split_turns,
+    truncate_text_to_tokens,
+    truncate_turn,
+)
 from agent.llm import FakeClient, Message, ToolCall, Usage
 from agent.loop import RunCheckpoint, RunResult, run
 from agent.tools import build_registry
@@ -76,10 +84,10 @@ def test_retrieval_selects_relevant_turns_within_budget() -> None:
     messages = _task_conversation()
     anchor = anchor_end(messages)
     turns = split_turns(messages, anchor)
-    base = estimate_context_chars(messages[:anchor]) + estimate_context_chars(turns[-1])
-    budget = base + estimate_context_chars(turns[0]) + estimate_context_chars(turns[2])
+    base = estimate_context_tokens(messages[:anchor]) + estimate_context_tokens(turns[-1])
+    budget = base + estimate_context_tokens(turns[0]) + estimate_context_tokens(turns[2]) + 20
 
-    plan = plan_retrieval_context(messages, budget_chars=budget, keep_recent=1)
+    plan = plan_retrieval_context(messages, budget_tokens=budget, keep_recent=1)
 
     assert plan.strategy == "retrieval"
     assert plan.retrieval is not None
@@ -91,12 +99,13 @@ def test_retrieval_selects_relevant_turns_within_budget() -> None:
     assert plan.dropped_detail[0]["index"] == 1
     assert "第一周计划" in plan.dropped_detail[0]["preview"]
     assert "score" in plan.dropped_detail[0]
+    assert plan.retrieval["tokens_after"] <= budget
 
 
 def test_retrieval_always_keeps_most_recent_turn() -> None:
     messages = _task_conversation()
 
-    plan = plan_retrieval_context(messages, budget_chars=1, keep_recent=1)
+    plan = plan_retrieval_context(messages, budget_tokens=1, keep_recent=1)
 
     assert plan.retrieval is not None
     assert plan.retrieval["selected"] == 0
@@ -113,24 +122,102 @@ def test_retrieval_without_old_turn_keeps_full() -> None:
         _tool("c1", "read_file", "内容"),
     ]
 
-    plan = plan_retrieval_context(messages, budget_chars=10)
+    plan = plan_retrieval_context(messages, budget_tokens=200)
 
     assert plan.messages == messages
     assert plan.retrieval is not None
     assert plan.retrieval["reason"] == "no_old_turns"
 
 
+def test_retrieval_truncates_huge_recent_turn_without_old_turns() -> None:
+    """只有一轮且该轮超大时，也要按预算截断，不能只标记 over_budget 就原样发出。"""
+    messages = [
+        Message(role="system", content="系统"),
+        Message(role="user", content="任务"),
+        _call("c0", "read_file", '{"path": "big.log"}'),
+        _tool("c0", "read_file", "日志" * 2000),
+    ]
+
+    plan = plan_retrieval_context(messages, budget_tokens=300)
+
+    assert plan.retrieval is not None
+    assert plan.retrieval["reason"] == "no_old_turns"
+    assert plan.retrieval["truncated_turns"] == 1
+    assert plan.retrieval["tokens_after"] <= 300
+    assert "已截断" in plan.messages[-1].content
+    assert [m.role for m in plan.messages] == ["system", "user", "assistant", "tool"]
+
+
+def test_retrieval_truncates_oversized_turn_instead_of_dropping() -> None:
+    """候选轮整轮放不下时，保留该轮并截断工具输出，而不是把证据整轮丢掉。"""
+    messages = [
+        Message(role="system", content="系统"),
+        Message(role="user", content="任务：Python 版本"),
+        _call("c0", "search_files", '{"pattern": "Python"}'),
+        _tool("c0", "search_files", "Python 3.13 " * 200),
+        _call("c1", "read_file", '{"path": "noise.md"}'),
+        _tool("c1", "read_file", "噪声" * 200),
+        _call("c2", "read_file", '{"path": "pyproject.toml"}'),
+        _tool("c2", "read_file", "requires-python >=3.13"),
+    ]
+
+    plan = plan_retrieval_context(messages, budget_tokens=200, keep_recent=1)
+
+    assert plan.retrieval is not None
+    assert plan.retrieval["truncated_turns"] >= 1
+    assert "已截断" in "".join(message.content or "" for message in plan.messages)
+    assert plan.messages[-2].role == "assistant" and plan.messages[-1].role == "tool"
+
+
+def test_retrieval_budget_includes_tool_schema() -> None:
+    """预算按请求总量算：工具定义先扣掉，消息只能用到剩余部分。"""
+    messages = [
+        Message(role="system", content="系统"),
+        Message(role="user", content="任务"),
+        _call("c0", "read_file", '{"path": "big.log"}'),
+        _tool("c0", "read_file", "日志" * 2000),
+    ]
+
+    plan = plan_retrieval_context(messages, budget_tokens=400, tools_tokens=200)
+
+    assert plan.retrieval is not None
+    assert plan.retrieval["message_budget"] == 200
+    assert plan.retrieval["truncated_turns"] == 1
+    assert plan.retrieval["request_tokens_est"] <= 400
+    assert plan.retrieval["over_budget"] is False
+    assert plan.retrieval["tokens_after"] <= 200
+
+
 def test_retrieval_rejects_bad_settings() -> None:
     messages = _task_conversation()
     with pytest.raises(ValueError):
-        plan_retrieval_context(messages, budget_chars=0)
+        plan_retrieval_context(messages, budget_tokens=0)
     with pytest.raises(ValueError):
         plan_retrieval_context(messages, keep_recent=0)
+    with pytest.raises(ValueError):
+        plan_retrieval_context(messages, min_segment_tokens=0)
+    with pytest.raises(ValueError):
+        plan_retrieval_context(messages, recent_ratio=1.0)
 
 
 def test_retrieval_params_have_central_defaults() -> None:
-    assert RETRIEVAL_BUDGET_CHARS > 0
+    assert RETRIEVAL_BUDGET_TOKENS > 0
     assert RETRIEVAL_KEEP_RECENT >= 1
+    assert RETRIEVAL_MIN_SEGMENT_TOKENS > 0
+
+
+def test_truncate_helpers_keep_structure_and_mark_cut() -> None:
+    assert truncate_text_to_tokens("短文本", 100) == "短文本"
+    cut = truncate_text_to_tokens("很长的中文内容" * 50, 30)
+    assert "已截断" in cut
+    assert count_tokens(cut) <= 30
+    assert len(cut) < 250
+
+    turn = [_call("c0", "read_file", '{"path": "a.py"}'), _tool("c0", "read_file", "内容" * 300)]
+    fitted = truncate_turn(turn, 50)
+    assert fitted is not None
+    assert [message.role for message in fitted] == ["assistant", "tool"]
+    assert fitted[0].tool_calls[0].arguments == '{"path": "a.py"}'
 
 
 class _CapturingFake(FakeClient):
@@ -245,4 +332,4 @@ def test_cli_passes_retrieval_budget(monkeypatch, tmp_path: Path, capsys) -> Non
 
     assert code == 0
     assert captured["retrieval_budget"] == 777
-    assert "[context] retrieval（预算 777 字符）" in out
+    assert "[context] retrieval（预算 777 token）" in out
