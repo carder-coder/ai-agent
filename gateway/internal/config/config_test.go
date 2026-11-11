@@ -6,6 +6,7 @@ import (
 )
 
 func TestLoadUsesGatewayDefaults(t *testing.T) {
+	t.Setenv("GATEWAY_PROVIDER", "")
 	t.Setenv("GATEWAY_PORT", "")
 	t.Setenv("GATEWAY_MAX_CONCURRENCY", "")
 	t.Setenv("GATEWAY_MAX_RETRIES", "")
@@ -20,6 +21,9 @@ func TestLoadUsesGatewayDefaults(t *testing.T) {
 	}
 	if cfg.Port != 8080 || cfg.Address() != ":8080" {
 		t.Fatalf("unexpected address: %s", cfg.Address())
+	}
+	if cfg.Provider != "doubao" {
+		t.Fatalf("default provider = %q, want doubao", cfg.Provider)
 	}
 	if cfg.MaxConcurrent != 200 || cfg.MaxRetries != 2 || cfg.RequestTimeout != 30*time.Second {
 		t.Fatalf("unexpected request limits: %+v", cfg)

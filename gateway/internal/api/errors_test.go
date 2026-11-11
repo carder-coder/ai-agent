@@ -25,7 +25,7 @@ func TestChatValidatesRequiredFields(t *testing.T) {
 		{name: "invalid content type", body: `{"model":"chat","messages":[{"role":"user","content":12}]}`, wantMessage: "messages[0].content: must be a string or array"},
 	}
 
-	handler := NewRouter(config.Config{})
+	handler := newTestRouter(t, config.Config{})
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(test.body))
@@ -87,7 +87,7 @@ func TestChatForwardsRequestAndDoesNotPassUpstreamHeaders(t *testing.T) {
 		`{"model":"public-model","messages":[{"role":"user","content":"hi"}],"temperature":0.2}`,
 	))
 	response := httptest.NewRecorder()
-	NewRouter(cfg).ServeHTTP(response, request)
+	newTestRouter(t, cfg).ServeHTTP(response, request)
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body)
@@ -119,7 +119,7 @@ func TestChatMapsUpstreamUnauthorized(t *testing.T) {
 	body := `{"model":"chat","messages":[{"role":"user","content":"hi"}]}`
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	response := httptest.NewRecorder()
-	NewRouter(cfg).ServeHTTP(response, request)
+	newTestRouter(t, cfg).ServeHTTP(response, request)
 
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body)
@@ -143,7 +143,7 @@ func TestChatRejectsStreamingUntilSSEIsImplemented(t *testing.T) {
 	body := `{"model":"chat","messages":[{"role":"user","content":"hi"}],"stream":true}`
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	response := httptest.NewRecorder()
-	NewRouter(config.Config{}).ServeHTTP(response, request)
+	newTestRouter(t, config.Config{}).ServeHTTP(response, request)
 
 	if response.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body)
@@ -151,4 +151,46 @@ func TestChatRejectsStreamingUntilSSEIsImplemented(t *testing.T) {
 	if !strings.Contains(response.Body.String(), "stream:") {
 		t.Fatalf("expected field-level streaming message, got %s", response.Body)
 	}
+}
+
+func TestChatUsesConfiguredMockProvider(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"public-model","messages":[{"role":"user","content":"hi"}]}`,
+	))
+	response := httptest.NewRecorder()
+	newTestRouter(t, config.Config{Provider: "mock"}).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body)
+	}
+	var result struct {
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode mock response: %v", err)
+	}
+	if result.Model != "public-model" || len(result.Choices) != 1 ||
+		result.Choices[0].Message.Content != "mock response" {
+		t.Fatalf("unexpected mock response: %+v", result)
+	}
+}
+
+func TestNewRouterRejectsUnregisteredProvider(t *testing.T) {
+	if _, err := NewRouter(config.Config{Provider: "missing"}); err == nil {
+		t.Fatal("NewRouter() accepted an unregistered provider")
+	}
+}
+
+func newTestRouter(t *testing.T, cfg config.Config) http.Handler {
+	t.Helper()
+	handler, err := NewRouter(cfg)
+	if err != nil {
+		t.Fatalf("NewRouter() error = %v", err)
+	}
+	return handler
 }

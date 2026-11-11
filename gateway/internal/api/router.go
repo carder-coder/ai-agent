@@ -1,18 +1,38 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/carder-coder/ai-agent/gateway/internal/config"
+	"github.com/carder-coder/ai-agent/gateway/internal/provider"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider/doubao"
+	"github.com/carder-coder/ai-agent/gateway/internal/provider/mock"
 )
 
-func NewRouter(cfg config.Config) http.Handler {
+func NewRouter(cfg config.Config) (http.Handler, error) {
+	registry := provider.NewRegistry()
+	if err := registry.Register("doubao", doubao.NewClient(cfg)); err != nil {
+		return nil, fmt.Errorf("register doubao provider: %w", err)
+	}
+	if err := registry.Register("mock", mock.New()); err != nil {
+		return nil, fmt.Errorf("register mock provider: %w", err)
+	}
+	providerName := strings.TrimSpace(cfg.Provider)
+	if providerName == "" {
+		providerName = "doubao"
+	}
+	adapter, err := registry.Get(providerName)
+	if err != nil {
+		return nil, err
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
-	mux.HandleFunc("/v1/chat/completions", chatHandler(doubao.NewClient(cfg)))
+	mux.HandleFunc("/v1/chat/completions", chatHandler(adapter, cfg.Model))
 	mux.HandleFunc("/metrics", notImplementedHandler)
-	return mux
+	return mux, nil
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {

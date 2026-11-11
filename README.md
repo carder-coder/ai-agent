@@ -147,6 +147,8 @@ deploy/              网关容器构建与本地编排
 
 Python 是 Agent 侧，Go 是服务侧；Go module 位于 `gateway/`，在该目录内运行
 `go test ./...`、`go vet ./...` 或 `go run ./cmd/gateway`。
+网关默认使用 `.env` 中的豆包配置；本地离线运行可在启动前设置
+`$env:GATEWAY_PROVIDER = "mock"`，命令仍为 `go run ./cmd/gateway`。
 
 ## 远程仓库
 

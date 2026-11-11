@@ -14,6 +14,7 @@ import (
 const defaultBaseURL = "https://ark.cn-beijing.volces.com/api/v3"
 
 type Config struct {
+	Provider       string
 	Port           int
 	APIKey         string
 	Model          string
@@ -74,6 +75,7 @@ func Load() (Config, error) {
 	}
 
 	return Config{
+		Provider:       stringEnv("GATEWAY_PROVIDER", "doubao"),
 		Port:           port,
 		APIKey:         os.Getenv("ARK_API_KEY"),
 		Model:          os.Getenv("ARK_MODEL"),

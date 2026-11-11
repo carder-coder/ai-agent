@@ -19,10 +19,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("加载配置失败：%v", err)
 	}
+	handler, err := api.NewRouter(cfg)
+	if err != nil {
+		log.Fatalf("初始化路由失败：%v", err)
+	}
 
 	server := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           api.NewRouter(cfg),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/carder-coder/ai-agent/gateway/internal/provider"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider/doubao"
 )
 
@@ -21,7 +22,7 @@ type chatMessage struct {
 	ToolCall json.RawMessage `json:"tool_calls"`
 }
 
-func chatHandler(client *doubao.Client) http.HandlerFunc {
+func chatHandler(adapter provider.Adapter, configuredModel string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")
@@ -46,7 +47,11 @@ func chatHandler(client *doubao.Client) http.HandlerFunc {
 			writeError(w, http.StatusNotImplemented, "stream: streaming is not implemented yet", "server_error", "not_implemented")
 			return
 		}
-		if err := setJSONField(fields, "model", client.Model(requestedModel)); err != nil {
+		model := strings.TrimSpace(configuredModel)
+		if model == "" {
+			model = requestedModel
+		}
+		if err := setJSONField(fields, "model", model); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to prepare upstream request", "server_error", "internal_error")
 			return
 		}
@@ -56,7 +61,7 @@ func chatHandler(client *doubao.Client) http.HandlerFunc {
 			return
 		}
 
-		result, err := client.Complete(r.Context(), upstreamBody)
+		result, err := adapter.Chat(r.Context(), upstreamBody, false)
 		if err != nil {
 			if r.Context().Err() != nil {
 				return
@@ -147,7 +152,7 @@ func setJSONField(fields map[string]json.RawMessage, key, value string) error {
 	return nil
 }
 
-func writeUpstreamError(w http.ResponseWriter, result doubao.Result) {
+func writeUpstreamError(w http.ResponseWriter, result provider.Response) {
 	status := http.StatusBadGateway
 	errorType, code := "upstream_error", "upstream_error"
 	switch result.StatusCode {
