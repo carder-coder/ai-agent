@@ -19,7 +19,10 @@ func TestRecorderWritesReplayCompatibleJSONL(t *testing.T) {
 		t.Fatalf("NewRecorder() error = %v", err)
 	}
 	usage := Usage{In: 3, Out: 2, Total: 5}
-	if err := recorder.RecordLLM("mock-model", 5, 6, "stop", usage, 1, 0.0123, "按 usage 计费"); err != nil {
+	if err := recorder.RecordLLM(
+		"mock-model", 5, 6, "stop", usage, 1, 0.0123, "按 usage 计费",
+		Route{TaskType: "simple", ContextLength: 12, Reason: "simple_task"},
+	); err != nil {
 		t.Fatalf("RecordLLM() error = %v", err)
 	}
 	if err := recorder.End("completed", 1); err != nil {
@@ -51,7 +54,8 @@ func TestRecorderWritesReplayCompatibleJSONL(t *testing.T) {
 	llmUsage, ok := events[1]["usage"].(map[string]any)
 	if !ok || llmUsage["in"] != float64(3) || llmUsage["out"] != float64(2) ||
 		events[1]["first_byte_ms"] != float64(5) || events[1]["attempts"] != float64(1) ||
-		events[1]["cost_yuan"] != float64(0.0123) || events[1]["cost_note"] != "按 usage 计费" {
+		events[1]["cost_yuan"] != float64(0.0123) || events[1]["cost_note"] != "按 usage 计费" ||
+		events[1]["route"] == nil {
 		t.Fatalf("LLM event does not match replay schema: %#v", events[1])
 	}
 	endUsage, ok := events[2]["usage"].(map[string]any)

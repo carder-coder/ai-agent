@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +26,7 @@ func TestChatValidatesRequiredFields(t *testing.T) {
 		{name: "missing messages", body: `{"model":"chat"}`, wantMessage: "messages: is required"},
 		{name: "invalid role", body: `{"model":"chat","messages":[{"role":"robot","content":"hi"}]}`, wantMessage: "messages[0].role: unsupported role"},
 		{name: "invalid content type", body: `{"model":"chat","messages":[{"role":"user","content":12}]}`, wantMessage: "messages[0].content: must be a string or array"},
+		{name: "invalid task type", body: `{"model":"chat","messages":[{"role":"user","content":"hi"}],"task_type":"unknown"}`, wantMessage: "task_type: must be simple or complex"},
 	}
 
 	handler := newTestRouter(t, config.Config{})
@@ -44,6 +47,90 @@ func TestChatValidatesRequiredFields(t *testing.T) {
 			}
 			if envelope.Error.Type != "invalid_request_error" || envelope.Error.Code != "invalid_request" {
 				t.Fatalf("unexpected error classification: %+v", envelope.Error)
+			}
+		})
+	}
+}
+
+func TestChatRoutesByTaskTypeAndContextLength(t *testing.T) {
+	traceDir := t.TempDir()
+	var upstreamModel string
+	var upstreamHasTaskType bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read upstream request: %v", err)
+			return
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Errorf("decode upstream request: %v", err)
+			return
+		}
+		if err := json.Unmarshal(payload["model"], &upstreamModel); err != nil {
+			t.Errorf("decode upstream model: %v", err)
+			return
+		}
+		_, upstreamHasTaskType = payload["task_type"]
+		response, err := json.Marshal(map[string]any{"model": upstreamModel, "choices": []any{}})
+		if err != nil {
+			t.Errorf("encode upstream response: %v", err)
+			return
+		}
+		_, _ = w.Write(response)
+	}))
+	defer upstream.Close()
+
+	handler := newTestRouter(t, config.Config{
+		APIKey:                "test-key",
+		BaseURL:               upstream.URL,
+		Model:                 "standard",
+		TraceDir:              traceDir,
+		RouteSimpleModel:      "economy",
+		RouteComplexModel:     "premium",
+		RouteContextThreshold: 40,
+	})
+	tests := []struct {
+		name      string
+		body      string
+		wantModel string
+		wantRoute string
+	}{
+		{
+			name:      "explicit simple task",
+			body:      `{"model":"client","messages":[{"role":"user","content":"hi"}],"task_type":"simple"}`,
+			wantModel: "economy",
+			wantRoute: `"reason":"simple_task"`,
+		},
+		{
+			name:      "large context takes complex tier",
+			body:      `{"model":"client","messages":[{"role":"user","content":"` + strings.Repeat("x", 80) + `"}],"task_type":"simple"}`,
+			wantModel: "premium",
+			wantRoute: `"reason":"context_threshold"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(
+				http.MethodPost, "/v1/chat/completions", strings.NewReader(test.body),
+			))
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body)
+			}
+			if upstreamModel != test.wantModel {
+				t.Fatalf("upstream model = %q, want %q", upstreamModel, test.wantModel)
+			}
+			if upstreamHasTaskType {
+				t.Fatal("gateway-only task_type was forwarded upstream")
+			}
+			tracePath := filepath.Join(traceDir, response.Header().Get("X-Trace-ID")+".jsonl")
+			trace, err := os.ReadFile(tracePath)
+			if err != nil {
+				t.Fatalf("read trace: %v", err)
+			}
+			if !strings.Contains(string(trace), test.wantRoute) {
+				t.Fatalf("trace missing route decision %q: %s", test.wantRoute, trace)
 			}
 		})
 	}

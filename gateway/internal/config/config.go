@@ -16,18 +16,21 @@ const defaultBaseURL = "https://ark.cn-beijing.volces.com/api/v3"
 
 // Config 保存启动网关及调用 Provider 所需的配置快照。
 type Config struct {
-	Provider       string
-	Port           int
-	APIKey         string
-	Model          string
-	BaseURL        string
-	RequestTimeout time.Duration
-	MaxConcurrent  int
-	MaxRetries     int
-	TraceDir       string
-	PriceIn        float64
-	PriceOut       float64
-	PriceCached    float64
+	Provider              string
+	Port                  int
+	APIKey                string
+	Model                 string
+	BaseURL               string
+	RequestTimeout        time.Duration
+	MaxConcurrent         int
+	MaxRetries            int
+	TraceDir              string
+	PriceIn               float64
+	PriceOut              float64
+	PriceCached           float64
+	RouteSimpleModel      string
+	RouteComplexModel     string
+	RouteContextThreshold int
 }
 
 // Load 读取 .env 与进程环境变量，校验参数后返回配置。
@@ -76,6 +79,13 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	routeContextThreshold, err := intEnv("GATEWAY_ROUTE_CONTEXT_THRESHOLD", 8192)
+	if err != nil {
+		return Config{}, err
+	}
+	if routeContextThreshold < 1 {
+		return Config{}, fmt.Errorf("GATEWAY_ROUTE_CONTEXT_THRESHOLD 必须大于 0")
+	}
 
 	return Config{
 		Provider:       stringEnv("GATEWAY_PROVIDER", "doubao"),
@@ -90,6 +100,12 @@ func Load() (Config, error) {
 		PriceIn:        priceIn,
 		PriceOut:       priceOut,
 		PriceCached:    priceCached,
+		RouteSimpleModel: stringEnv(
+			"GATEWAY_ROUTE_SIMPLE_MODEL",
+			stringEnv("ARK_MODEL_MINI", os.Getenv("ARK_MODEL")),
+		),
+		RouteComplexModel:     stringEnv("GATEWAY_ROUTE_COMPLEX_MODEL", os.Getenv("ARK_MODEL")),
+		RouteContextThreshold: routeContextThreshold,
 	}, nil
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/carder-coder/ai-agent/gateway/internal/provider/doubao"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider/mock"
 	"github.com/carder-coder/ai-agent/gateway/internal/retry"
+	"github.com/carder-coder/ai-agent/gateway/internal/routing"
 )
 
 // NewRouter 根据配置装配 Provider、路由和中间件，返回可直接运行的 HTTP handler。
@@ -45,10 +46,15 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/v1/chat/completions", chatHandler(
 		guardedAdapter,
-		cfg.Model,
 		cfg.TraceDir,
 		collector,
 		cost.Prices{Input: cfg.PriceIn, Output: cfg.PriceOut, Cached: cfg.PriceCached},
+		routing.Rules{
+			DefaultModel:     cfg.Model,
+			SimpleModel:      cfg.RouteSimpleModel,
+			ComplexModel:     cfg.RouteComplexModel,
+			ContextThreshold: cfg.RouteContextThreshold,
+		},
 	))
 	mux.Handle("/metrics", collector)
 	// 从外到内依次采集指标、注入 trace、限流、处理幂等请求并恢复 panic。

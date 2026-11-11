@@ -15,6 +15,11 @@ func TestLoadUsesGatewayDefaults(t *testing.T) {
 	t.Setenv("ARK_PRICE_IN", "")
 	t.Setenv("ARK_PRICE_OUT", "")
 	t.Setenv("ARK_PRICE_CACHED", "")
+	t.Setenv("GATEWAY_ROUTE_CONTEXT_THRESHOLD", "")
+	t.Setenv("GATEWAY_ROUTE_SIMPLE_MODEL", "")
+	t.Setenv("GATEWAY_ROUTE_COMPLEX_MODEL", "")
+	t.Setenv("ARK_MODEL_MINI", "")
+	t.Setenv("ARK_MODEL", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -31,6 +36,9 @@ func TestLoadUsesGatewayDefaults(t *testing.T) {
 	}
 	if cfg.PriceIn != 0.8 || cfg.PriceOut != 3.2 || cfg.PriceCached != 0.016 {
 		t.Fatalf("unexpected default prices: %+v", cfg)
+	}
+	if cfg.RouteContextThreshold != 8192 {
+		t.Fatalf("route context threshold = %d, want 8192", cfg.RouteContextThreshold)
 	}
 }
 
@@ -53,6 +61,9 @@ func TestLoadUsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("GATEWAY_MAX_CONCURRENCY", "50")
 	t.Setenv("GATEWAY_MAX_RETRIES", "0")
 	t.Setenv("GATEWAY_TIMEOUT", "2s")
+	t.Setenv("GATEWAY_ROUTE_SIMPLE_MODEL", "economy")
+	t.Setenv("GATEWAY_ROUTE_COMPLEX_MODEL", "premium")
+	t.Setenv("GATEWAY_ROUTE_CONTEXT_THRESHOLD", "4096")
 
 	cfg, err := Load()
 	if err != nil {
@@ -61,5 +72,9 @@ func TestLoadUsesEnvironmentOverrides(t *testing.T) {
 	if cfg.Address() != ":9090" || cfg.MaxConcurrent != 50 || cfg.MaxRetries != 0 ||
 		cfg.RequestTimeout != 2*time.Second {
 		t.Fatalf("environment overrides not applied: %+v", cfg)
+	}
+	if cfg.RouteSimpleModel != "economy" || cfg.RouteComplexModel != "premium" ||
+		cfg.RouteContextThreshold != 4096 {
+		t.Fatalf("route overrides not applied: %+v", cfg)
 	}
 }

@@ -13,11 +13,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/carder-coder/ai-agent/gateway/internal/cost"
 	"github.com/carder-coder/ai-agent/gateway/internal/metrics"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider"
 	"github.com/carder-coder/ai-agent/gateway/internal/retry"
+	"github.com/carder-coder/ai-agent/gateway/internal/routing"
 	"github.com/carder-coder/ai-agent/gateway/internal/sse"
 	"github.com/carder-coder/ai-agent/gateway/internal/trace"
 )
@@ -33,9 +35,10 @@ type chatMessage struct {
 // chatHandler 校验聊天请求并调用 Provider；成功请求会记录兼容重放器的 trace。
 func chatHandler(
 	adapter provider.Adapter,
-	configuredModel, traceDir string,
+	traceDir string,
 	collector *metrics.Metrics,
 	prices cost.Prices,
+	rules routing.Rules,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -52,15 +55,15 @@ func chatHandler(
 			writeError(w, http.StatusRequestEntityTooLarge, "body: exceeds 1 MiB limit", "invalid_request_error", "request_too_large")
 			return
 		}
-		fields, requestedModel, stream, validationError := validateChatRequest(body)
+		fields, requestedModel, taskType, stream, validationError := validateChatRequest(body)
 		if validationError != "" {
 			writeError(w, http.StatusBadRequest, validationError, "invalid_request_error", "invalid_request")
 			return
 		}
-		model := strings.TrimSpace(configuredModel)
-		if model == "" {
-			model = requestedModel
-		}
+		contextLength := estimateContextLength(fields["messages"])
+		decision := routing.Select(taskType, contextLength, requestedModel, rules)
+		model := decision.Model
+		delete(fields, "task_type")
 		if err := setJSONField(fields, "model", model); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to prepare upstream request", "server_error", "internal_error")
 			return
@@ -153,7 +156,10 @@ func chatHandler(
 				costNote = "计费失败: " + err.Error()
 				log.Printf("计算流式请求成本失败：%v", err)
 			}
-			recordTraceLLM(recorder, model, started, firstByte, finishReason, usage, result.Attempts, requestCost, costNote)
+			recordTraceLLM(
+				recorder, model, started, firstByte, finishReason, usage,
+				result.Attempts, requestCost, costNote, decision,
+			)
 			return
 		}
 		var response map[string]json.RawMessage
@@ -179,6 +185,7 @@ func chatHandler(
 			result.Attempts,
 			requestCost,
 			costNote,
+			decision,
 		)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -203,6 +210,7 @@ func recordTraceLLM(
 	attempts int,
 	costYuan float64,
 	costNote string,
+	decision routing.Decision,
 ) {
 	if recorder == nil {
 		return
@@ -221,6 +229,11 @@ func recordTraceLLM(
 		attempts,
 		costYuan,
 		costNote,
+		trace.Route{
+			TaskType:      decision.TaskType,
+			ContextLength: decision.ContextLength,
+			Reason:        decision.Reason,
+		},
 	)
 	if err != nil {
 		log.Printf("写入请求 trace 模型事件失败：%v", err)
@@ -371,55 +384,68 @@ func writeStreamDone(writer *sse.Writer) {
 }
 
 // validateChatRequest 检查 OpenAI 兼容请求的必要字段，并返回可继续转发的原始 JSON 字段。
-func validateChatRequest(body []byte) (map[string]json.RawMessage, string, bool, string) {
+func validateChatRequest(body []byte) (map[string]json.RawMessage, string, string, bool, string) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
-		return nil, "", false, "body: must be a JSON object"
+		return nil, "", "", false, "body: must be a JSON object"
 	}
 	modelRaw, exists := fields["model"]
 	if !exists {
-		return nil, "", false, "model: is required"
+		return nil, "", "", false, "model: is required"
 	}
 	var model string
 	if err := json.Unmarshal(modelRaw, &model); err != nil || strings.TrimSpace(model) == "" {
-		return nil, "", false, "model: must be a non-empty string"
+		return nil, "", "", false, "model: must be a non-empty string"
 	}
 
 	messagesRaw, exists := fields["messages"]
 	if !exists {
-		return nil, "", false, "messages: is required"
+		return nil, "", "", false, "messages: is required"
 	}
 	var messages []json.RawMessage
 	if err := json.Unmarshal(messagesRaw, &messages); err != nil || len(messages) == 0 {
-		return nil, "", false, "messages: must be a non-empty array"
+		return nil, "", "", false, "messages: must be a non-empty array"
 	}
 	for i, raw := range messages {
 		var message chatMessage
 		if err := json.Unmarshal(raw, &message); err != nil {
-			return nil, "", false, fmt.Sprintf("messages[%d]: must be an object", i)
+			return nil, "", "", false, fmt.Sprintf("messages[%d]: must be an object", i)
 		}
 		switch message.Role {
 		case "system", "developer", "user", "assistant", "tool", "function":
 		default:
-			return nil, "", false, fmt.Sprintf("messages[%d].role: unsupported role", i)
+			return nil, "", "", false, fmt.Sprintf("messages[%d].role: unsupported role", i)
 		}
 		hasToolCalls := len(message.ToolCall) > 0 && string(message.ToolCall) != "null"
 		hasContent := len(message.Content) > 0 && string(message.Content) != "null"
 		if hasContent && !isStringOrArray(message.Content) {
-			return nil, "", false, fmt.Sprintf("messages[%d].content: must be a string or array", i)
+			return nil, "", "", false, fmt.Sprintf("messages[%d].content: must be a string or array", i)
 		}
 		if !hasContent && !(message.Role == "assistant" && hasToolCalls) {
-			return nil, "", false, fmt.Sprintf("messages[%d].content: is required", i)
+			return nil, "", "", false, fmt.Sprintf("messages[%d].content: is required", i)
+		}
+	}
+
+	taskType := ""
+	if rawTaskType, exists := fields["task_type"]; exists {
+		if err := json.Unmarshal(rawTaskType, &taskType); err != nil ||
+			(taskType != "" && taskType != "simple" && taskType != "complex") {
+			return nil, "", "", false, "task_type: must be simple or complex"
 		}
 	}
 
 	var stream bool
 	if streamRaw, exists := fields["stream"]; exists {
 		if err := json.Unmarshal(streamRaw, &stream); err != nil {
-			return nil, "", false, "stream: must be a boolean"
+			return nil, "", "", false, "stream: must be a boolean"
 		}
 	}
-	return fields, model, stream, ""
+	return fields, model, taskType, stream, ""
+}
+
+func estimateContextLength(messages json.RawMessage) int {
+	// 网关不绑定具体模型 tokenizer，因此用消息 JSON 字符数做稳定、可回放的分级信号。
+	return utf8.RuneCount(messages)
 }
 
 func setJSONField(fields map[string]json.RawMessage, key, value string) error {

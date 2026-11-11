@@ -22,6 +22,13 @@ type Usage struct {
 	Cached int `json:"cached"`
 }
 
+// Route 记录模型分级路由的输入与选择依据。
+type Route struct {
+	TaskType      string `json:"task_type"`
+	ContextLength int    `json:"context_length"`
+	Reason        string `json:"reason"`
+}
+
 // Recorder 将单次网关请求的模型调用和汇总写入 JSONL 文件。
 type Recorder struct {
 	mu        sync.Mutex
@@ -87,6 +94,7 @@ func (r *Recorder) RecordLLM(
 	attempts int,
 	costYuan float64,
 	costNote string,
+	route Route,
 ) error {
 	if attempts < 1 {
 		attempts = 1
@@ -108,6 +116,7 @@ func (r *Recorder) RecordLLM(
 		"attempts":      attempts,
 		"cost_yuan":     costYuan,
 		"cost_note":     costNote,
+		"route":         route,
 		"tool_calls":    []string{},
 	})
 }

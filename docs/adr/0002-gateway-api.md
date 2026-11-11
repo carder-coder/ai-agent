@@ -59,6 +59,10 @@
 `cached_tokens <= input_tokens`；成本按非缓存输入、缓存输入、输出三档单价分别计算，再四舍五入到
 0.0001 元。trace 的单次成本与累计成本均记录计费精度下的值。
 
+路由通过 `GATEWAY_ROUTE_SIMPLE_MODEL`、`GATEWAY_ROUTE_COMPLEX_MODEL` 和
+`GATEWAY_ROUTE_CONTEXT_THRESHOLD` 集中配置。聊天请求可附带 `task_type: "simple"` 或
+`"complex"`；长上下文阈值优先，路由输入与选择原因记录在 `llm.route` trace 字段。
+
 ## 目录边界
 
 Go 服务和 Python Agent 同仓，但各用独立工具链：Go 代码、命令和测试位于 `gateway/`，不在仓库根目录创建
