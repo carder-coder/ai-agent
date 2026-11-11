@@ -147,6 +147,16 @@ func (r *Recorder) RecordCache(
 	})
 }
 
+// RecordBudgetRejection 留下预算预检拒绝的估算成本与额度，便于排查限额命中。
+func (r *Recorder) RecordBudgetRejection(estimate, dailyLimit, requestLimit float64, reason string) error {
+	return r.writeEvent("budget_rejected", map[string]any{
+		"estimated_cost_yuan": estimate,
+		"daily_limit_yuan":    dailyLimit,
+		"request_limit_yuan":  requestLimit,
+		"reason":              reason,
+	})
+}
+
 // End 写入包含累计用量的 run_end 事件并关闭 trace 文件。
 func (r *Recorder) End(stopReason string, steps int) error {
 	r.mu.Lock()

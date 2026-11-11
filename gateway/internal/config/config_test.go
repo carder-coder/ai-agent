@@ -21,6 +21,10 @@ func TestLoadUsesGatewayDefaults(t *testing.T) {
 	t.Setenv("ARK_MODEL_MINI", "")
 	t.Setenv("ARK_MODEL", "")
 	t.Setenv("GATEWAY_SEMANTIC_CACHE_THRESHOLD", "")
+	t.Setenv("GATEWAY_DAILY_BUDGET_YUAN", "")
+	t.Setenv("GATEWAY_REQUEST_MAX_COST_YUAN", "")
+	t.Setenv("GATEWAY_BUDGET_MAX_OUTPUT_TOKENS", "")
+	t.Setenv("GATEWAY_BUDGET_STATE_FILE", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -43,6 +47,10 @@ func TestLoadUsesGatewayDefaults(t *testing.T) {
 	}
 	if cfg.SemanticCacheThreshold != 0.95 {
 		t.Fatalf("semantic cache threshold = %f, want 0.95", cfg.SemanticCacheThreshold)
+	}
+	if cfg.DailyBudgetYuan != 100 || cfg.RequestMaxCostYuan != 0.5 ||
+		cfg.BudgetMaxOutputTokens != 4096 || cfg.BudgetStateFile != "traces/budget.json" {
+		t.Fatalf("unexpected budget defaults: %+v", cfg)
 	}
 }
 
@@ -67,6 +75,13 @@ func TestLoadRejectsInvalidSemanticCacheThreshold(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsNonPositiveBudgetLimits(t *testing.T) {
+	t.Setenv("GATEWAY_DAILY_BUDGET_YUAN", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() accepted a zero daily budget")
+	}
+}
+
 func TestLoadUsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("GATEWAY_PORT", "9090")
 	t.Setenv("GATEWAY_MAX_CONCURRENCY", "50")
@@ -76,6 +91,10 @@ func TestLoadUsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("GATEWAY_ROUTE_COMPLEX_MODEL", "premium")
 	t.Setenv("GATEWAY_ROUTE_CONTEXT_THRESHOLD", "4096")
 	t.Setenv("GATEWAY_SEMANTIC_CACHE_THRESHOLD", "0.97")
+	t.Setenv("GATEWAY_DAILY_BUDGET_YUAN", "200")
+	t.Setenv("GATEWAY_REQUEST_MAX_COST_YUAN", "0.25")
+	t.Setenv("GATEWAY_BUDGET_MAX_OUTPUT_TOKENS", "2048")
+	t.Setenv("GATEWAY_BUDGET_STATE_FILE", "state/budget.json")
 
 	cfg, err := Load()
 	if err != nil {
@@ -91,5 +110,9 @@ func TestLoadUsesEnvironmentOverrides(t *testing.T) {
 	}
 	if cfg.SemanticCacheThreshold != 0.97 {
 		t.Fatalf("semantic cache threshold = %f, want 0.97", cfg.SemanticCacheThreshold)
+	}
+	if cfg.DailyBudgetYuan != 200 || cfg.RequestMaxCostYuan != 0.25 ||
+		cfg.BudgetMaxOutputTokens != 2048 || cfg.BudgetStateFile != "state/budget.json" {
+		t.Fatalf("budget overrides not applied: %+v", cfg)
 	}
 }

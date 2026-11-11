@@ -123,3 +123,36 @@ def test_replay_includes_semantic_cache_cost_in_total(tmp_path: Path, capsys) ->
     output = capsys.readouterr().out
     assert "语义缓存命中: model=economy" in output
     assert "与 run_end 差值: 0.0 元" in output
+
+
+def test_replay_displays_budget_rejection(tmp_path: Path, capsys) -> None:
+    """预算拒绝原因应出现在 trace 重放结果中。"""
+    trace = tmp_path / "budget.jsonl"
+    events = [
+        {"kind": "run_start", "run_id": "budget", "ts": "2026-11-11T10:00:00"},
+        {
+            "kind": "budget_rejected",
+            "estimated_cost_yuan": 0.6,
+            "daily_limit_yuan": 100,
+            "request_limit_yuan": 0.5,
+            "reason": "request_cost_limit_exceeded",
+            "ts": "2026-11-11T10:00:01",
+        },
+        {
+            "kind": "run_end",
+            "steps": 0,
+            "stop_reason": "budget_rejected",
+            "usage": {"in": 0, "out": 0, "total": 0},
+            "total_cost_yuan": 0,
+            "ts": "2026-11-11T10:00:02",
+        },
+    ]
+    trace.write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+    assert replay(trace) == 0
+    output = capsys.readouterr().out
+    assert "预算拒绝: 估算成本=0.6 元" in output
+    assert "request_cost_limit_exceeded" in output

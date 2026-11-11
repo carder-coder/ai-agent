@@ -39,6 +39,7 @@ def replay(path: Path) -> int:
     stop_reason = _required(end, "stop_reason", missing)
     llm_events = [event for event in events if event.get("kind") == "llm"]
     cache_events = [event for event in events if event.get("kind") == "cache"]
+    budget_rejections = [event for event in events if event.get("kind") == "budget_rejected"]
     tool_events: dict[int, list[dict[str, Any]]] = {}
     summary_events: dict[int, list[dict[str, Any]]] = {}
     summary_errors: dict[int, list[dict[str, Any]]] = {}
@@ -147,6 +148,14 @@ def replay(path: Path) -> int:
             f"相似度={cached.get('similarity', '字段缺失：similarity')} | "
             f"token={usage.get('in', '?')}/{usage.get('out', '?')} | "
             f"成本={cached.get('cost_yuan', '字段缺失：cost_yuan')} 元"
+        )
+
+    for rejection in budget_rejections:
+        print(
+            f"预算拒绝: 估算成本={rejection.get('estimated_cost_yuan', '?')} 元 | "
+            f"日预算={rejection.get('daily_limit_yuan', '?')} 元 | "
+            f"单请求上限={rejection.get('request_limit_yuan', '?')} 元 | "
+            f"原因={rejection.get('reason', '?')}"
         )
 
     usage_total = _required(end, "usage", missing)

@@ -4,9 +4,11 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/carder-coder/ai-agent/gateway/internal/budget"
 	semanticcache "github.com/carder-coder/ai-agent/gateway/internal/cache"
 	"github.com/carder-coder/ai-agent/gateway/internal/config"
 	"github.com/carder-coder/ai-agent/gateway/internal/cost"
@@ -22,6 +24,18 @@ import (
 func NewRouter(cfg config.Config) (http.Handler, error) {
 	if cfg.MaxConcurrent < 1 {
 		return nil, fmt.Errorf("GATEWAY_MAX_CONCURRENCY must be positive")
+	}
+	if strings.TrimSpace(cfg.TraceDir) == "" {
+		cfg.TraceDir = "traces"
+	}
+	if cfg.DailyBudgetYuan == 0 {
+		cfg.DailyBudgetYuan = config.DefaultDailyBudgetYuan
+	}
+	if cfg.RequestMaxCostYuan == 0 {
+		cfg.RequestMaxCostYuan = config.DefaultRequestMaxCostYuan
+	}
+	if cfg.BudgetMaxOutputTokens == 0 {
+		cfg.BudgetMaxOutputTokens = config.DefaultBudgetMaxOutputTokens
 	}
 	registry := provider.NewRegistry()
 	if err := registry.Register("doubao", doubao.NewClient(cfg)); err != nil {
@@ -45,6 +59,14 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 
 	collector := metrics.New()
 	semanticCache := semanticcache.New(cfg.SemanticCacheThreshold, 30*time.Minute)
+	statePath := cfg.BudgetStateFile
+	if strings.TrimSpace(statePath) == "" {
+		statePath = filepath.Join(cfg.TraceDir, "budget.json")
+	}
+	budgetLedger, err := budget.New(cfg.DailyBudgetYuan, cfg.RequestMaxCostYuan, statePath)
+	if err != nil {
+		return nil, fmt.Errorf("initialize budget ledger: %w", err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/v1/chat/completions", chatHandler(
@@ -59,6 +81,8 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 			ContextThreshold: cfg.RouteContextThreshold,
 		},
 		semanticCache,
+		budgetLedger,
+		cfg.BudgetMaxOutputTokens,
 	))
 	mux.HandleFunc("/v1/cache/feedback", cacheFeedbackHandler(semanticCache, collector))
 	mux.Handle("/metrics", collector)

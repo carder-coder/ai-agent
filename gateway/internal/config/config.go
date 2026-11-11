@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,6 +14,12 @@ import (
 )
 
 const defaultBaseURL = "https://ark.cn-beijing.volces.com/api/v3"
+
+const (
+	DefaultDailyBudgetYuan       = 100.0
+	DefaultRequestMaxCostYuan    = 0.50
+	DefaultBudgetMaxOutputTokens = 4096
+)
 
 // Config 保存启动网关及调用 Provider 所需的配置快照。
 type Config struct {
@@ -32,6 +39,10 @@ type Config struct {
 	RouteComplexModel      string
 	RouteContextThreshold  int
 	SemanticCacheThreshold float64
+	DailyBudgetYuan        float64
+	RequestMaxCostYuan     float64
+	BudgetMaxOutputTokens  int
+	BudgetStateFile        string
 }
 
 // Load 读取 .env 与进程环境变量，校验参数后返回配置。
@@ -94,6 +105,27 @@ func Load() (Config, error) {
 	if !(cacheThreshold > 0 && cacheThreshold <= 1) {
 		return Config{}, fmt.Errorf("GATEWAY_SEMANTIC_CACHE_THRESHOLD 必须大于 0 且不超过 1")
 	}
+	dailyBudget, err := floatEnv("GATEWAY_DAILY_BUDGET_YUAN", DefaultDailyBudgetYuan)
+	if err != nil {
+		return Config{}, err
+	}
+	if dailyBudget <= 0 {
+		return Config{}, fmt.Errorf("GATEWAY_DAILY_BUDGET_YUAN 必须大于 0")
+	}
+	requestMaxCost, err := floatEnv("GATEWAY_REQUEST_MAX_COST_YUAN", DefaultRequestMaxCostYuan)
+	if err != nil {
+		return Config{}, err
+	}
+	if requestMaxCost <= 0 {
+		return Config{}, fmt.Errorf("GATEWAY_REQUEST_MAX_COST_YUAN 必须大于 0")
+	}
+	budgetMaxOutputTokens, err := intEnv("GATEWAY_BUDGET_MAX_OUTPUT_TOKENS", DefaultBudgetMaxOutputTokens)
+	if err != nil {
+		return Config{}, err
+	}
+	if budgetMaxOutputTokens < 1 || budgetMaxOutputTokens > 1_000_000 {
+		return Config{}, fmt.Errorf("GATEWAY_BUDGET_MAX_OUTPUT_TOKENS 必须在 1 到 1000000 之间")
+	}
 
 	return Config{
 		Provider:       stringEnv("GATEWAY_PROVIDER", "doubao"),
@@ -115,6 +147,10 @@ func Load() (Config, error) {
 		RouteComplexModel:      stringEnv("GATEWAY_ROUTE_COMPLEX_MODEL", os.Getenv("ARK_MODEL")),
 		RouteContextThreshold:  routeContextThreshold,
 		SemanticCacheThreshold: cacheThreshold,
+		DailyBudgetYuan:        dailyBudget,
+		RequestMaxCostYuan:     requestMaxCost,
+		BudgetMaxOutputTokens:  budgetMaxOutputTokens,
+		BudgetStateFile:        stringEnv("GATEWAY_BUDGET_STATE_FILE", "traces/budget.json"),
 	}, nil
 }
 
@@ -196,7 +232,7 @@ func floatEnv(key string, fallback float64) (float64, error) {
 		return fallback, nil
 	}
 	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil || parsed < 0 {
+	if err != nil || parsed < 0 || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
 		return 0, fmt.Errorf("%s 必须是非负数", key)
 	}
 	return parsed, nil

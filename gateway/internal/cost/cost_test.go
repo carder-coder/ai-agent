@@ -45,3 +45,16 @@ func TestCalculateRejectsInvalidUsage(t *testing.T) {
 		}
 	}
 }
+
+func TestUpperBoundRoundsUpForBudgetReservation(t *testing.T) {
+	got, err := UpperBound(
+		provider.Usage{InputTokens: 1, TotalTokens: 1},
+		Prices{Input: 0.8},
+	)
+	if err != nil {
+		t.Fatalf("UpperBound() error = %v", err)
+	}
+	if got != 0.0001 {
+		t.Fatalf("UpperBound() = %.4f, want 0.0001", got)
+	}
+}

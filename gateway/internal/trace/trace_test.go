@@ -111,3 +111,24 @@ func TestRecorderIncludesSemanticCacheCostInRunEnd(t *testing.T) {
 		t.Fatalf("trace missing cache event or accumulated cost: %s", content)
 	}
 }
+
+func TestRecorderWritesBudgetRejectionEvent(t *testing.T) {
+	recorder, err := NewRecorder(t.TempDir(), "", "POST /v1/chat/completions")
+	if err != nil {
+		t.Fatalf("NewRecorder() error = %v", err)
+	}
+	if err := recorder.RecordBudgetRejection(0.6, 100, 0.5, "request_cost_limit_exceeded"); err != nil {
+		t.Fatalf("RecordBudgetRejection() error = %v", err)
+	}
+	if err := recorder.End("budget_rejected", 0); err != nil {
+		t.Fatalf("End() error = %v", err)
+	}
+	content, err := os.ReadFile(recorder.Path())
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	if !strings.Contains(string(content), `"kind":"budget_rejected"`) ||
+		!strings.Contains(string(content), `"request_limit_yuan":0.5`) {
+		t.Fatalf("trace missing budget rejection details: %s", content)
+	}
+}

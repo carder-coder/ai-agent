@@ -71,6 +71,14 @@
 命中率由 `gateway_semantic_cache_hit_ratio`（hit / eligible lookup）直接暴露。反馈样本数同时保留，
 无反馈时错误率 gauge 为 0，需结合反馈计数判断样本是否充足。
 
+预算默认日上限 100 元、单请求上限 0.50 元；若客户端未给出 `max_tokens` 或
+`max_completion_tokens`，网关向上游补充默认 `max_tokens=4096`。预检以 messages UTF-8 字节数作为
+输入 token 上界、按最贵的普通输入单价估算，并向上取整到 0.0001 元后原子预留；上游返回 usage 后
+用实际成本结算；usage 缺失或流未完整时按预留额保守计费。预算状态以本地日期及 JSON 文件持久化，
+进程重启时未结算预留按已使用额度处理；
+单实例有效，不提供多副本间共享锁。超单请求上限返回 `429/request_cost_limit_exceeded`，日预算不足
+返回 `429/daily_budget_exceeded`，拒绝 trace 记录估算值与错误码。
+
 ## 目录边界
 
 Go 服务和 Python Agent 同仓，但各用独立工具链：Go 代码、命令和测试位于 `gateway/`，不在仓库根目录创建

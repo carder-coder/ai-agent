@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/carder-coder/ai-agent/gateway/internal/budget"
 	semanticcache "github.com/carder-coder/ai-agent/gateway/internal/cache"
 	"github.com/carder-coder/ai-agent/gateway/internal/cost"
 	"github.com/carder-coder/ai-agent/gateway/internal/metrics"
@@ -43,6 +44,8 @@ func chatHandler(
 	prices cost.Prices,
 	rules routing.Rules,
 	semanticCache *semanticcache.Store,
+	budgetLedger *budget.Ledger,
+	defaultMaxOutputTokens int,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -72,6 +75,11 @@ func chatHandler(
 			writeError(w, http.StatusInternalServerError, "failed to prepare upstream request", "server_error", "internal_error")
 			return
 		}
+		estimatedCost, err := prepareBudgetEstimate(fields, defaultMaxOutputTokens, prices)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_request")
+			return
+		}
 		upstreamBody, err := json.Marshal(fields)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "body: must be valid JSON", "invalid_request_error", "invalid_request")
@@ -82,18 +90,21 @@ func chatHandler(
 		started := time.Now()
 		var usage provider.Usage
 		success := false
+		modelObserved := false
 		requestCost := 0.0
 		costNote := "按 usage 计费，精度 0.0001 元"
 		defer func() {
-			collector.ObserveModel(
-				model,
-				time.Since(started),
-				usage.InputTokens,
-				usage.OutputTokens,
-				usage.CachedTokens,
-				requestCost,
-				success,
-			)
+			if modelObserved {
+				collector.ObserveModel(
+					model,
+					time.Since(started),
+					usage.InputTokens,
+					usage.OutputTokens,
+					usage.CachedTokens,
+					requestCost,
+					success,
+				)
+			}
 		}()
 		recorder, traceErr := trace.NewRecorder(traceDir, trace.IDFromContext(r.Context()), "POST /v1/chat/completions")
 		if traceErr != nil {
@@ -107,17 +118,69 @@ func chatHandler(
 				}
 			}()
 		}
+		traceID := trace.IDFromContext(r.Context())
+		if err := budgetLedger.Reserve(traceID, estimatedCost); err != nil {
+			stopReason = "budget_rejected"
+			code := budgetErrorCode(err)
+			if recorder != nil {
+				limits := budgetLedger.SnapshotLimits()
+				if traceErr := recorder.RecordBudgetRejection(
+					estimatedCost,
+					limits.DailyLimitYuan,
+					limits.RequestLimitYuan,
+					code,
+				); traceErr != nil {
+					log.Printf("记录预算拒绝 trace 失败：%v", traceErr)
+				}
+			}
+			switch {
+			case errors.Is(err, budget.ErrRequestLimitExceeded):
+				writeError(w, http.StatusTooManyRequests, "estimated request cost exceeds the configured limit", "rate_limit_error", code)
+			case errors.Is(err, budget.ErrDailyBudgetExceeded):
+				writeError(w, http.StatusTooManyRequests, "daily budget has been exhausted", "rate_limit_error", code)
+			default:
+				log.Printf("预留请求预算失败：%v", err)
+				writeError(w, http.StatusServiceUnavailable, "budget ledger is unavailable", "server_error", code)
+			}
+			return
+		}
+		modelObserved = true
+		reservationActive := true
+		defer func() {
+			if reservationActive {
+				if err := budgetLedger.Release(traceID); err != nil {
+					log.Printf("释放未结算预算预留失败：%v", err)
+				}
+			}
+		}()
+		releaseReservation := func() {
+			if err := budgetLedger.Release(traceID); err != nil {
+				log.Printf("释放预算预留失败：%v", err)
+				return
+			}
+			reservationActive = false
+		}
+		consumeReservation := func() {
+			requestCost = estimatedCost
+			if costNote == "按 usage 计费，精度 0.0001 元" {
+				costNote = "上游 usage 不可用，按预算预留估算计费"
+			}
+			if err := budgetLedger.ConsumeReservation(traceID); err != nil {
+				log.Printf("按预留上限结算不确定请求失败：%v", err)
+				return
+			}
+			reservationActive = false
+		}
+		settleReservation := func(actualCost float64) error {
+			err := budgetLedger.Settle(traceID, actualCost)
+			reservationActive = false
+			return err
+		}
 
 		if cacheEligible {
 			entry, similarity, hit := semanticCache.Lookup(cacheScope, cacheQuery)
 			collector.ObserveCacheLookup(hit)
 			if hit {
-				traceID := trace.IDFromContext(r.Context())
-				if err := semanticCache.TrackHit(traceID, entry.ID); err != nil {
-					log.Printf("关联语义缓存反馈失败：%v", err)
-					writeError(w, http.StatusServiceUnavailable, "semantic cache feedback capacity reached", "server_error", "cache_feedback_unavailable")
-					return
-				}
 				usage = provider.Usage{
 					InputTokens:  entry.Usage.InputTokens,
 					TotalTokens:  entry.Usage.InputTokens,
@@ -127,6 +190,11 @@ func chatHandler(
 				if err != nil {
 					stopReason = "cache_usage_error"
 					writeError(w, http.StatusBadGateway, "semantic cache contains invalid token usage", "upstream_error", "invalid_usage")
+					return
+				}
+				if err := semanticCache.TrackHit(traceID, entry.ID); err != nil {
+					log.Printf("关联语义缓存反馈失败：%v", err)
+					writeError(w, http.StatusServiceUnavailable, "semantic cache feedback capacity reached", "server_error", "cache_feedback_unavailable")
 					return
 				}
 				cachedBody, err := semanticCacheResponse(entry.Body, model, traceID, usage)
@@ -157,6 +225,17 @@ func chatHandler(
 						log.Printf("写入语义缓存 trace 失败：%v", err)
 					}
 				}
+				if hasReportedUsage(usage) {
+					if err := settleReservation(requestCost); err != nil {
+						stopReason = "budget_settlement_error"
+						writeBudgetSettlementError(w, err)
+						return
+					}
+				} else {
+					requestCost = estimatedCost
+					costNote = "缓存用量未知，按预留估算计费"
+					consumeReservation()
+				}
 				w.Header().Set("X-Semantic-Cache", "HIT")
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
@@ -176,35 +255,46 @@ func chatHandler(
 		if err != nil {
 			if r.Context().Err() != nil {
 				stopReason = "cancelled"
+				consumeReservation()
 				return
 			}
 			if errors.Is(err, provider.ErrAuthentication) {
 				stopReason = "authentication_error"
+				releaseReservation()
 				writeError(w, http.StatusUnauthorized, "provider authentication failed", "authentication_error", "invalid_api_key")
 				return
 			}
 			if errors.Is(err, retry.ErrCircuitOpen) {
 				stopReason = "circuit_open"
+				releaseReservation()
 				writeError(w, http.StatusServiceUnavailable, "provider circuit breaker is open", "server_error", "circuit_open")
 				return
 			}
 			if provider.IsTimeout(err) {
 				stopReason = "timeout"
+				consumeReservation()
 				writeError(w, http.StatusGatewayTimeout, "upstream request timed out", "timeout", "upstream_timeout")
 				return
 			}
 			stopReason = "upstream_error"
+			consumeReservation()
 			writeError(w, http.StatusBadGateway, "upstream request failed", "upstream_error", "upstream_error")
 			return
 		}
 		if result.StatusCode < http.StatusOK || result.StatusCode >= http.StatusMultipleChoices {
 			stopReason = "upstream_error"
+			if result.StatusCode == http.StatusUnauthorized || result.StatusCode == http.StatusTooManyRequests {
+				releaseReservation()
+			} else {
+				consumeReservation()
+			}
 			writeUpstreamError(w, result)
 			return
 		}
 		if stream {
 			if result.Stream == nil {
 				stopReason = "invalid_upstream_response"
+				consumeReservation()
 				writeError(w, http.StatusBadGateway, "upstream did not return a stream", "upstream_error", "invalid_upstream_response")
 				return
 			}
@@ -224,6 +314,17 @@ func chatHandler(
 				success = false
 				costNote = "计费失败: " + err.Error()
 				log.Printf("计算流式请求成本失败：%v", err)
+				requestCost = estimatedCost
+				consumeReservation()
+			} else if !completed || !hasReportedUsage(usage) {
+				// 流被中断或上游未提供 usage 时，按预留估算额结算，避免漏记实际支出。
+				requestCost = estimatedCost
+				costNote = "上游用量未知或流未完成，按预留估算计费"
+				consumeReservation()
+			} else if settleErr := settleReservation(requestCost); settleErr != nil {
+				success = false
+				stopReason = "budget_settlement_error"
+				log.Printf("结算流式请求预算失败：%v", settleErr)
 			}
 			recordTraceLLM(
 				recorder, model, started, firstByte, finishReason, usage,
@@ -234,6 +335,7 @@ func chatHandler(
 		var response map[string]json.RawMessage
 		if err := json.Unmarshal(result.Body, &response); err != nil || response == nil {
 			stopReason = "invalid_upstream_response"
+			consumeReservation()
 			writeError(w, http.StatusBadGateway, "upstream returned an invalid JSON response", "upstream_error", "invalid_upstream_response")
 			return
 		}
@@ -241,8 +343,17 @@ func chatHandler(
 		requestCost, err = cost.Calculate(usage, prices)
 		if err != nil {
 			stopReason = "invalid_usage"
+			requestCost = estimatedCost
+			costNote = "上游用量无效，按预留估算计入预算"
+			consumeReservation()
 			writeError(w, http.StatusBadGateway, "provider returned invalid token usage", "upstream_error", "invalid_usage")
 			return
+		}
+		if !hasReportedUsage(usage) {
+			// 部分 Provider 会省略 usage；无用量时按预留估算结算，不以零成本放行。
+			requestCost = estimatedCost
+			costNote = "上游未返回用量，按预留估算计费"
+			consumeReservation()
 		}
 		if cacheEligible && !semanticCache.Put(semanticcache.Entry{
 			ID:    trace.IDFromContext(r.Context()),
@@ -265,6 +376,13 @@ func chatHandler(
 			costNote,
 			decision,
 		)
+		if hasReportedUsage(usage) {
+			if err := settleReservation(requestCost); err != nil {
+				stopReason = "budget_settlement_error"
+				writeBudgetSettlementError(w, err)
+				return
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if _, err := io.Copy(w, bytes.NewReader(append(result.Body, '\n'))); err != nil {
@@ -362,6 +480,76 @@ func semanticCacheResponse(body []byte, model, traceID string, usage provider.Us
 		return nil, fmt.Errorf("encode cached response: %w", err)
 	}
 	return encoded, nil
+}
+
+func prepareBudgetEstimate(
+	fields map[string]json.RawMessage,
+	defaultOutputTokens int,
+	prices cost.Prices,
+) (float64, error) {
+	outputTokens := 0
+	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
+		raw, exists := fields[key]
+		if !exists {
+			continue
+		}
+		var limit int
+		if err := json.Unmarshal(raw, &limit); err != nil || limit < 1 || limit > 1_000_000 {
+			return 0, fmt.Errorf("%s: must be an integer between 1 and 1000000", key)
+		}
+		outputTokens = max(outputTokens, limit)
+	}
+	if outputTokens == 0 {
+		if defaultOutputTokens < 1 || defaultOutputTokens > 1_000_000 {
+			return 0, errors.New("gateway default output token limit is invalid")
+		}
+		outputTokens = defaultOutputTokens
+		if err := setJSONIntField(fields, "max_tokens", outputTokens); err != nil {
+			return 0, fmt.Errorf("set default max_tokens: %w", err)
+		}
+	}
+	inputTokens := len(bytes.TrimSpace(fields["messages"]))
+	return cost.UpperBound(provider.Usage{
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		TotalTokens:  inputTokens + outputTokens,
+	}, prices)
+}
+
+func setJSONIntField(fields map[string]json.RawMessage, key string, value int) error {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	fields[key] = encoded
+	return nil
+}
+
+func hasReportedUsage(usage provider.Usage) bool {
+	return usage.TotalTokens > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0
+}
+
+func writeBudgetSettlementError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, budget.ErrRequestLimitExceeded):
+		writeError(w, http.StatusTooManyRequests, "actual request cost exceeds the configured limit", "rate_limit_error", "request_cost_limit_exceeded")
+	case errors.Is(err, budget.ErrDailyBudgetExceeded):
+		writeError(w, http.StatusTooManyRequests, "daily budget has been exhausted", "rate_limit_error", "daily_budget_exceeded")
+	default:
+		log.Printf("结算预算状态失败：%v", err)
+		writeError(w, http.StatusServiceUnavailable, "budget ledger is unavailable", "server_error", "budget_unavailable")
+	}
+}
+
+func budgetErrorCode(err error) string {
+	switch {
+	case errors.Is(err, budget.ErrRequestLimitExceeded):
+		return "request_cost_limit_exceeded"
+	case errors.Is(err, budget.ErrDailyBudgetExceeded):
+		return "daily_budget_exceeded"
+	default:
+		return "budget_unavailable"
+	}
 }
 
 // recordTraceLLM 将 Provider 用量和延迟写入当前请求的 trace。
