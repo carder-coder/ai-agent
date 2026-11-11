@@ -2,13 +2,16 @@ package api
 
 import (
 	"net/http"
+
+	"github.com/carder-coder/ai-agent/gateway/internal/config"
+	"github.com/carder-coder/ai-agent/gateway/internal/provider/doubao"
 )
 
-func NewRouter() http.Handler {
+func NewRouter(cfg config.Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
-	mux.HandleFunc("POST /v1/chat/completions", notImplementedHandler)
-	mux.HandleFunc("GET /metrics", notImplementedHandler)
+	mux.HandleFunc("/v1/chat/completions", chatHandler(doubao.NewClient(cfg)))
+	mux.HandleFunc("/metrics", notImplementedHandler)
 	return mux
 }
 

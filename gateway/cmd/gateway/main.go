@@ -22,7 +22,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           api.NewRouter(),
+		Handler:           api.NewRouter(cfg),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
