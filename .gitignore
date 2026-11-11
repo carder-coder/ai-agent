@@ -31,6 +31,9 @@ models/
 *.safetensors
 *.sqlite
 *.db
+/gateway/bin/
+*.test
+gateway/traces/
 
 # 编辑器与系统
 .vscode/*

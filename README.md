@@ -141,7 +141,12 @@ tests/               单元测试
 docs/adr/            关键决策记录
 docs/experiments/    实验记录，与代码同次提交
 scripts/             一次性脚本与跑批入口
+gateway/             Go 服务侧：独立 module 的 A3 Agent Gateway
+deploy/              网关容器构建与本地编排
 ```
+
+Python 是 Agent 侧，Go 是服务侧；Go module 位于 `gateway/`，在该目录内运行
+`go test ./...`、`go vet ./...` 或 `go run ./cmd/gateway`。
 
 ## 远程仓库
 
