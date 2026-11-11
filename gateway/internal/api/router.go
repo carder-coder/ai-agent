@@ -10,9 +10,13 @@ import (
 	"github.com/carder-coder/ai-agent/gateway/internal/provider"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider/doubao"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider/mock"
+	"github.com/carder-coder/ai-agent/gateway/internal/retry"
 )
 
 func NewRouter(cfg config.Config) (http.Handler, error) {
+	if cfg.MaxConcurrent < 1 {
+		return nil, fmt.Errorf("GATEWAY_MAX_CONCURRENCY must be positive")
+	}
 	registry := provider.NewRegistry()
 	if err := registry.Register("doubao", doubao.NewClient(cfg)); err != nil {
 		return nil, fmt.Errorf("register doubao provider: %w", err)
@@ -28,13 +32,20 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	guardedAdapter, err := retry.NewAdapter(adapter, cfg.MaxRetries)
+	if err != nil {
+		return nil, err
+	}
 
 	collector := metrics.New()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
-	mux.HandleFunc("/v1/chat/completions", chatHandler(adapter, cfg.Model))
+	mux.HandleFunc("/v1/chat/completions", chatHandler(guardedAdapter, cfg.Model))
 	mux.Handle("/metrics", collector)
-	return collector.Wrap(mux), nil
+	handler := NewIdempotencyCache().Wrap(recoveryMiddleware(mux))
+	handler = concurrencyMiddleware(cfg.MaxConcurrent, handler)
+	handler = requestLoggingMiddleware(handler)
+	return collector.Wrap(handler), nil
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {

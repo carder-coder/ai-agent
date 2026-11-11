@@ -47,12 +47,12 @@ func Load() (Config, error) {
 	if maxConcurrent < 1 {
 		return Config{}, fmt.Errorf("GATEWAY_MAX_CONCURRENCY 必须大于 0")
 	}
-	maxRetries, err := intEnv("GATEWAY_MAX_RETRIES", 2)
+	maxRetries, err := intEnv("GATEWAY_MAX_RETRIES", 3)
 	if err != nil {
 		return Config{}, err
 	}
-	if maxRetries < 0 {
-		return Config{}, fmt.Errorf("GATEWAY_MAX_RETRIES 不能小于 0")
+	if maxRetries < 0 || maxRetries > 3 {
+		return Config{}, fmt.Errorf("GATEWAY_MAX_RETRIES 必须在 0 到 3 之间")
 	}
 	timeout, err := timeEnv("GATEWAY_TIMEOUT", 30*time.Second)
 	if err != nil {

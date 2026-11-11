@@ -36,6 +36,7 @@ type Response struct {
 	RetryAfter string
 	Stream     ChunkStream
 	Usage      Usage
+	Attempts   int
 }
 
 type Adapter interface {

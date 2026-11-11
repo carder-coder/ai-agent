@@ -149,6 +149,9 @@ Python 是 Agent 侧，Go 是服务侧；Go module 位于 `gateway/`，在该目
 `go test ./...`、`go vet ./...` 或 `go run ./cmd/gateway`。
 网关默认使用 `.env` 中的豆包配置；本地离线运行可在启动前设置
 `$env:GATEWAY_PROVIDER = "mock"`，命令仍为 `go run ./cmd/gateway`。
+网关仅对明确返回的 429 按 1/2/4 秒退避；超时不自动重放。`Idempotency-Key` 的响应缓存是进程内、
+有界的 24 小时缓存，重启后清空；不要把它当跨实例分布式去重。
+网关会在响应 `X-Trace-ID` 中返回请求标识，并以 `GATEWAY_MAX_CONCURRENCY` 为并发上限；超过上限时返回 503。
 
 ## 远程仓库
 

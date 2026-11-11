@@ -25,7 +25,7 @@ func TestLoadUsesGatewayDefaults(t *testing.T) {
 	if cfg.Provider != "doubao" {
 		t.Fatalf("default provider = %q, want doubao", cfg.Provider)
 	}
-	if cfg.MaxConcurrent != 200 || cfg.MaxRetries != 2 || cfg.RequestTimeout != 30*time.Second {
+	if cfg.MaxConcurrent != 200 || cfg.MaxRetries != 3 || cfg.RequestTimeout != 30*time.Second {
 		t.Fatalf("unexpected request limits: %+v", cfg)
 	}
 	if cfg.PriceIn != 0.8 || cfg.PriceOut != 3.2 || cfg.PriceCached != 0.016 {
@@ -37,6 +37,13 @@ func TestLoadRejectsInvalidPort(t *testing.T) {
 	t.Setenv("GATEWAY_PORT", "70000")
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() accepted an invalid port")
+	}
+}
+
+func TestLoadRejectsTooManyRetries(t *testing.T) {
+	t.Setenv("GATEWAY_MAX_RETRIES", "4")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() accepted more retry attempts than the backoff schedule supports")
 	}
 }
 

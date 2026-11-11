@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/carder-coder/ai-agent/gateway/internal/provider"
+	"github.com/carder-coder/ai-agent/gateway/internal/retry"
 	"github.com/carder-coder/ai-agent/gateway/internal/sse"
 )
 
@@ -67,6 +68,10 @@ func chatHandler(adapter provider.Adapter, configuredModel string) http.HandlerF
 			}
 			if errors.Is(err, provider.ErrAuthentication) {
 				writeError(w, http.StatusUnauthorized, "provider authentication failed", "authentication_error", "invalid_api_key")
+				return
+			}
+			if errors.Is(err, retry.ErrCircuitOpen) {
+				writeError(w, http.StatusServiceUnavailable, "provider circuit breaker is open", "server_error", "circuit_open")
 				return
 			}
 			if provider.IsTimeout(err) {

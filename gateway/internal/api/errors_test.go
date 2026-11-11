@@ -198,13 +198,16 @@ func TestChatStreamsMockChunksAndRecordsFirstByte(t *testing.T) {
 }
 
 func TestNewRouterRejectsUnregisteredProvider(t *testing.T) {
-	if _, err := NewRouter(config.Config{Provider: "missing"}); err == nil {
+	if _, err := NewRouter(config.Config{Provider: "missing", MaxConcurrent: 1}); err == nil {
 		t.Fatal("NewRouter() accepted an unregistered provider")
 	}
 }
 
 func newTestRouter(t *testing.T, cfg config.Config) http.Handler {
 	t.Helper()
+	if cfg.MaxConcurrent == 0 {
+		cfg.MaxConcurrent = 200
+	}
 	handler, err := NewRouter(cfg)
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v", err)
