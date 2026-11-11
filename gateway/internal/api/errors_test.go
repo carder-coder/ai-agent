@@ -208,6 +208,9 @@ func newTestRouter(t *testing.T, cfg config.Config) http.Handler {
 	if cfg.MaxConcurrent == 0 {
 		cfg.MaxConcurrent = 200
 	}
+	if cfg.TraceDir == "" {
+		cfg.TraceDir = t.TempDir()
+	}
 	handler, err := NewRouter(cfg)
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v", err)

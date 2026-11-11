@@ -40,7 +40,7 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 	collector := metrics.New()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
-	mux.HandleFunc("/v1/chat/completions", chatHandler(guardedAdapter, cfg.Model))
+	mux.HandleFunc("/v1/chat/completions", chatHandler(guardedAdapter, cfg.Model, cfg.TraceDir))
 	mux.Handle("/metrics", collector)
 	handler := NewIdempotencyCache().Wrap(recoveryMiddleware(mux))
 	handler = concurrencyMiddleware(cfg.MaxConcurrent, handler)

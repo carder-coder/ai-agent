@@ -152,6 +152,8 @@ Python 是 Agent 侧，Go 是服务侧；Go module 位于 `gateway/`，在该目
 网关仅对明确返回的 429 按 1/2/4 秒退避；超时不自动重放。`Idempotency-Key` 的响应缓存是进程内、
 有界的 24 小时缓存，重启后清空；不要把它当跨实例分布式去重。
 网关会在响应 `X-Trace-ID` 中返回请求标识，并以 `GATEWAY_MAX_CONCURRENCY` 为并发上限；超过上限时返回 503。
+每次有效聊天请求会在 `GATEWAY_TRACE_DIR`（默认 `gateway/traces/`）写一份与 Python `scripts/replay.py` 对齐的 JSONL trace；
+成本暂记 0 并标注“待计费”，`/metrics` 暴露请求数、错误数、延迟和首字节指标。
 
 本地 mock 压测：先在一个终端设置 `GATEWAY_PROVIDER=mock` 并运行 `go run ./cmd/gateway`，
 再从 `gateway/` 目录运行 `go run ./cmd/loadtest --n 200 --c 200`。Docker Compose 部署入口为

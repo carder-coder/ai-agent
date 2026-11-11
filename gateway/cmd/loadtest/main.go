@@ -35,8 +35,12 @@ func main() {
 		os.Exit(2)
 	}
 
+	effectiveConcurrency := *concurrency
+	if effectiveConcurrency > *requests {
+		effectiveConcurrency = *requests
+	}
 	client := &http.Client{Timeout: *timeout}
-	results := runLoadTest(context.Background(), client, *target, *requests, *concurrency)
+	results := runLoadTest(context.Background(), client, *target, *requests, effectiveConcurrency)
 	successes := 0
 	latencies := make([]time.Duration, 0, len(results))
 	for _, result := range results {
@@ -49,7 +53,7 @@ func main() {
 	errorRate := float64(failures) / float64(len(results)) * 100
 	fmt.Printf(
 		"requests=%d concurrency=%d success=%d errors=%d error_rate=%.2f%% P50=%.2fms P95=%.2fms P99=%.2fms\n",
-		len(results), *concurrency, successes, failures, errorRate,
+		len(results), effectiveConcurrency, successes, failures, errorRate,
 		percentileMilliseconds(latencies, 0.50),
 		percentileMilliseconds(latencies, 0.95),
 		percentileMilliseconds(latencies, 0.99),

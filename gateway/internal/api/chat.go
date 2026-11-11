@@ -16,6 +16,7 @@ import (
 	"github.com/carder-coder/ai-agent/gateway/internal/provider"
 	"github.com/carder-coder/ai-agent/gateway/internal/retry"
 	"github.com/carder-coder/ai-agent/gateway/internal/sse"
+	"github.com/carder-coder/ai-agent/gateway/internal/trace"
 )
 
 const maxRequestBytes = 1 << 20
@@ -26,7 +27,7 @@ type chatMessage struct {
 	ToolCall json.RawMessage `json:"tool_calls"`
 }
 
-func chatHandler(adapter provider.Adapter, configuredModel string) http.HandlerFunc {
+func chatHandler(adapter provider.Adapter, configuredModel, traceDir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")
@@ -61,50 +62,131 @@ func chatHandler(adapter provider.Adapter, configuredModel string) http.HandlerF
 			return
 		}
 
+		started := time.Now()
+		recorder, traceErr := trace.NewRecorder(traceDir, trace.IDFromContext(r.Context()), "POST /v1/chat/completions")
+		if traceErr != nil {
+			log.Printf("创建请求 trace 失败：%v", traceErr)
+		}
+		stopReason := "internal_error"
+		if recorder != nil {
+			defer func() {
+				if err := recorder.End(stopReason, 1); err != nil {
+					log.Printf("写入请求 trace 结束事件失败：%v", err)
+				}
+			}()
+		}
+
 		result, err := adapter.Chat(r.Context(), upstreamBody, stream)
 		if err != nil {
 			if r.Context().Err() != nil {
+				stopReason = "cancelled"
 				return
 			}
 			if errors.Is(err, provider.ErrAuthentication) {
+				stopReason = "authentication_error"
 				writeError(w, http.StatusUnauthorized, "provider authentication failed", "authentication_error", "invalid_api_key")
 				return
 			}
 			if errors.Is(err, retry.ErrCircuitOpen) {
+				stopReason = "circuit_open"
 				writeError(w, http.StatusServiceUnavailable, "provider circuit breaker is open", "server_error", "circuit_open")
 				return
 			}
 			if provider.IsTimeout(err) {
+				stopReason = "timeout"
 				writeError(w, http.StatusGatewayTimeout, "upstream request timed out", "timeout", "upstream_timeout")
 				return
 			}
+			stopReason = "upstream_error"
 			writeError(w, http.StatusBadGateway, "upstream request failed", "upstream_error", "upstream_error")
 			return
 		}
 		if result.StatusCode < http.StatusOK || result.StatusCode >= http.StatusMultipleChoices {
+			stopReason = "upstream_error"
 			writeUpstreamError(w, result)
 			return
 		}
 		if stream {
 			if result.Stream == nil {
+				stopReason = "invalid_upstream_response"
 				writeError(w, http.StatusBadGateway, "upstream did not return a stream", "upstream_error", "invalid_upstream_response")
 				return
 			}
-			writeStreamResponse(w, r, result.Stream)
+			firstByte, finishReason, completed := writeStreamResponse(w, r, result.Stream, started)
+			if completed {
+				stopReason = "completed"
+			} else {
+				stopReason = "stream_interrupted"
+			}
+			if finishReason == "" {
+				finishReason = "stop"
+			}
+			recordTraceLLM(recorder, model, started, firstByte, finishReason, result.Stream.Usage(), result.Attempts)
 			return
 		}
 		var response map[string]json.RawMessage
 		if err := json.Unmarshal(result.Body, &response); err != nil || response == nil {
+			stopReason = "invalid_upstream_response"
 			writeError(w, http.StatusBadGateway, "upstream returned an invalid JSON response", "upstream_error", "invalid_upstream_response")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.Copy(w, bytes.NewReader(append(result.Body, '\n')))
+		if _, err := io.Copy(w, bytes.NewReader(append(result.Body, '\n'))); err != nil {
+			stopReason = "client_disconnected"
+			log.Printf("写入聊天响应失败：%v", err)
+			return
+		}
+		stopReason = "completed"
+		elapsed := time.Since(started)
+		recordTraceLLM(recorder, model, started, elapsed, responseFinishReason(result.Body), result.Usage, result.Attempts)
 	}
 }
 
-func writeStreamResponse(w http.ResponseWriter, r *http.Request, stream provider.ChunkStream) {
+func recordTraceLLM(
+	recorder *trace.Recorder,
+	model string,
+	started time.Time,
+	firstByte time.Duration,
+	finishReason string,
+	usage provider.Usage,
+	attempts int,
+) {
+	if recorder == nil {
+		return
+	}
+	err := recorder.RecordLLM(
+		model,
+		firstByte.Milliseconds(),
+		time.Since(started).Milliseconds(),
+		finishReason,
+		trace.Usage{
+			In:     usage.InputTokens,
+			Out:    usage.OutputTokens,
+			Total:  usage.TotalTokens,
+			Cached: usage.CachedTokens,
+		},
+		attempts,
+	)
+	if err != nil {
+		log.Printf("写入请求 trace 模型事件失败：%v", err)
+	}
+}
+
+func responseFinishReason(body []byte) string {
+	var response struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &response); err == nil && len(response.Choices) > 0 &&
+		response.Choices[0].FinishReason != "" {
+		return response.Choices[0].FinishReason
+	}
+	return "stop"
+}
+
+func writeStreamResponse(w http.ResponseWriter, r *http.Request, stream provider.ChunkStream, started time.Time) (firstByte time.Duration, finishReason string, completed bool) {
 	defer func() {
 		if err := stream.Close(); err != nil {
 			log.Printf("关闭 provider 流失败：%v", err)
@@ -113,13 +195,13 @@ func writeStreamResponse(w http.ResponseWriter, r *http.Request, stream provider
 	writer, err := sse.NewWriter(w, r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "streaming is not supported by this server", "server_error", "streaming_unsupported")
-		return
+		return 0, "", false
 	}
 	if err := writer.Start(); err != nil {
 		if r.Context().Err() == nil {
 			writeError(w, http.StatusInternalServerError, "failed to start SSE response", "server_error", "stream_start_failed")
 		}
-		return
+		return 0, "", false
 	}
 
 	type nextResult struct {
@@ -149,22 +231,22 @@ func writeStreamResponse(w http.ResponseWriter, r *http.Request, stream provider
 	for {
 		select {
 		case <-r.Context().Done():
-			return
+			return firstByte, finishReason, false
 		case <-heartbeat.C:
 			if err := writer.Heartbeat(); err != nil {
 				if r.Context().Err() == nil {
 					log.Printf("写 SSE 心跳失败：%v", err)
 				}
-				return
+				return firstByte, finishReason, false
 			}
 		case next, ok := <-events:
 			if !ok {
 				writeStreamDone(writer)
-				return
+				return firstByte, finishReason, true
 			}
 			if errors.Is(next.err, io.EOF) {
 				writeStreamDone(writer)
-				return
+				return firstByte, finishReason, true
 			}
 			if next.err != nil {
 				if r.Context().Err() == nil {
@@ -173,19 +255,38 @@ func writeStreamResponse(w http.ResponseWriter, r *http.Request, stream provider
 						log.Printf("写 SSE 错误事件失败：%v", err)
 					}
 				}
-				return
+				return firstByte, finishReason, false
+			}
+			if firstByte == 0 && len(next.chunk.Data) > 0 {
+				firstByte = time.Since(started)
+			}
+			if reason := streamFinishReason(next.chunk.Data); reason != "" {
+				finishReason = reason
 			}
 			if err := writer.WriteData(next.chunk.Data); err != nil {
 				if r.Context().Err() == nil {
 					log.Printf("写 SSE 数据块失败：%v", err)
 				}
-				return
+				return firstByte, finishReason, false
 			}
 			if next.chunk.Done {
-				return
+				return firstByte, finishReason, true
 			}
 		}
 	}
+}
+
+func streamFinishReason(body []byte) string {
+	var response struct {
+		Choices []struct {
+			FinishReason *string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &response); err == nil && len(response.Choices) > 0 &&
+		response.Choices[0].FinishReason != nil {
+		return *response.Choices[0].FinishReason
+	}
+	return ""
 }
 
 func writeStreamError(writer *sse.Writer) error {

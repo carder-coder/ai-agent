@@ -13,6 +13,9 @@ services:
       ARK_API_KEY: ${ARK_API_KEY:-}
       ARK_MODEL: ${ARK_MODEL:-}
       ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      ARK_PRICE_IN: ${ARK_PRICE_IN:-0.8}
+      ARK_PRICE_OUT: ${ARK_PRICE_OUT:-3.2}
+      ARK_PRICE_CACHED: ${ARK_PRICE_CACHED:-0.016}
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
     restart: unless-stopped

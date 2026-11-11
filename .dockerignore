@@ -7,3 +7,7 @@
 **/out
 **/traces
 gateway/traces
+data
+models
+*.gguf
+*.safetensors
