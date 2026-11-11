@@ -68,7 +68,8 @@ func TestChatWritesReplayableTraceForNormalAndStreamingResponses(t *testing.T) {
 				t.Fatalf("trace IDs or completion status do not match response: %#v", events)
 			}
 			usage, ok := events[1]["usage"].(map[string]any)
-			if !ok || usage["total"] != float64(5) || events[1]["attempts"] != float64(1) {
+			if !ok || usage["total"] != float64(5) || events[1]["attempts"] != float64(1) ||
+				events[1]["cost_yuan"] != float64(0) {
 				t.Fatalf("LLM usage or attempts missing from trace: %#v", events[1])
 			}
 			if events[1]["finish_reason"] != "stop" {

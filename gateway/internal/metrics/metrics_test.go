@@ -63,7 +63,7 @@ func TestMetricsExposeModelUsageCostAndLatency(t *testing.T) {
 		`gateway_model_input_tokens_total{model="economy"} 125`,
 		`gateway_model_output_tokens_total{model="economy"} 30`,
 		`gateway_model_cached_input_tokens_total{model="economy"} 20`,
-		`gateway_model_cost_yuan_total{model="economy"} 0.000000`,
+		`gateway_model_cost_yuan_total{model="economy"} 0.0000`,
 		`gateway_model_request_duration_seconds_count{model="economy"} 2`,
 	} {
 		if !strings.Contains(body, metric) {

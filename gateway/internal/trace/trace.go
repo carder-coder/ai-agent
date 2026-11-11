@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,10 +24,11 @@ type Usage struct {
 
 // Recorder 将单次网关请求的模型调用和汇总写入 JSONL 文件。
 type Recorder struct {
-	mu     sync.Mutex
-	file   *os.File
-	usage  Usage
-	closed bool
+	mu        sync.Mutex
+	file      *os.File
+	usage     Usage
+	costUnits int64
+	closed    bool
 }
 
 // NewRecorder 在 directory 中独占创建 trace 文件并写入 run_start 事件。
@@ -83,6 +85,8 @@ func (r *Recorder) RecordLLM(
 	finishReason string,
 	usage Usage,
 	attempts int,
+	costYuan float64,
+	costNote string,
 ) error {
 	if attempts < 1 {
 		attempts = 1
@@ -93,7 +97,7 @@ func (r *Recorder) RecordLLM(
 	r.usage.Out += usage.Out
 	r.usage.Total += usage.Total
 	r.usage.Cached += usage.Cached
-	// 网关每个请求只记录一次模型调用；本周尚未接入计费，因此成本显式记零。
+	r.costUnits += int64(math.Round(costYuan * 10_000))
 	return r.writeEventLocked("llm", map[string]any{
 		"step":          1,
 		"model":         model,
@@ -102,8 +106,8 @@ func (r *Recorder) RecordLLM(
 		"finish_reason": finishReason,
 		"usage":         usage,
 		"attempts":      attempts,
-		"cost_yuan":     0.0,
-		"cost_note":     "待计费",
+		"cost_yuan":     costYuan,
+		"cost_note":     costNote,
 		"tool_calls":    []string{},
 	})
 }
@@ -119,8 +123,8 @@ func (r *Recorder) End(stopReason string, steps int) error {
 		"stop_reason":     stopReason,
 		"steps":           steps,
 		"usage":           r.usage,
-		"total_cost_yuan": 0.0,
-		"cost_note":       "待计费",
+		"total_cost_yuan": float64(r.costUnits) / 10_000,
+		"cost_note":       "按 usage 计费，精度 0.0001 元",
 	})
 	r.closed = true
 	closeErr := r.file.Close()

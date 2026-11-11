@@ -56,7 +56,8 @@
 | 累计成本 | `gateway_model_cost_yuan_total` | 按 usage 与模型单价计算的估算人民币成本 |
 
 单次 usage 结构为 `{input_tokens, output_tokens, total_tokens, cached_tokens}`，其中
-`cached_tokens <= input_tokens`；成本精确到 0.0001 元后计入报告，trace 保留更高精度原值。
+`cached_tokens <= input_tokens`；成本按非缓存输入、缓存输入、输出三档单价分别计算，再四舍五入到
+0.0001 元。trace 的单次成本与累计成本均记录计费精度下的值。
 
 ## 目录边界
 

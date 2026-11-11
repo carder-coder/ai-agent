@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/carder-coder/ai-agent/gateway/internal/cost"
 	"github.com/carder-coder/ai-agent/gateway/internal/metrics"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider"
 	"github.com/carder-coder/ai-agent/gateway/internal/retry"
@@ -30,7 +31,12 @@ type chatMessage struct {
 }
 
 // chatHandler 校验聊天请求并调用 Provider；成功请求会记录兼容重放器的 trace。
-func chatHandler(adapter provider.Adapter, configuredModel, traceDir string, collector *metrics.Metrics) http.HandlerFunc {
+func chatHandler(
+	adapter provider.Adapter,
+	configuredModel, traceDir string,
+	collector *metrics.Metrics,
+	prices cost.Prices,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")
@@ -68,6 +74,8 @@ func chatHandler(adapter provider.Adapter, configuredModel, traceDir string, col
 		started := time.Now()
 		var usage provider.Usage
 		success := false
+		requestCost := 0.0
+		costNote := "按 usage 计费，精度 0.0001 元"
 		defer func() {
 			collector.ObserveModel(
 				model,
@@ -75,7 +83,7 @@ func chatHandler(adapter provider.Adapter, configuredModel, traceDir string, col
 				usage.InputTokens,
 				usage.OutputTokens,
 				usage.CachedTokens,
-				0,
+				requestCost,
 				success,
 			)
 		}()
@@ -139,7 +147,13 @@ func chatHandler(adapter provider.Adapter, configuredModel, traceDir string, col
 			}
 			usage = result.Stream.Usage()
 			success = completed
-			recordTraceLLM(recorder, model, started, firstByte, finishReason, usage, result.Attempts)
+			requestCost, err = cost.Calculate(usage, prices)
+			if err != nil {
+				success = false
+				costNote = "计费失败: " + err.Error()
+				log.Printf("计算流式请求成本失败：%v", err)
+			}
+			recordTraceLLM(recorder, model, started, firstByte, finishReason, usage, result.Attempts, requestCost, costNote)
 			return
 		}
 		var response map[string]json.RawMessage
@@ -148,6 +162,24 @@ func chatHandler(adapter provider.Adapter, configuredModel, traceDir string, col
 			writeError(w, http.StatusBadGateway, "upstream returned an invalid JSON response", "upstream_error", "invalid_upstream_response")
 			return
 		}
+		usage = result.Usage
+		requestCost, err = cost.Calculate(usage, prices)
+		if err != nil {
+			stopReason = "invalid_usage"
+			writeError(w, http.StatusBadGateway, "provider returned invalid token usage", "upstream_error", "invalid_usage")
+			return
+		}
+		recordTraceLLM(
+			recorder,
+			model,
+			started,
+			time.Since(started),
+			responseFinishReason(result.Body),
+			usage,
+			result.Attempts,
+			requestCost,
+			costNote,
+		)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if _, err := io.Copy(w, bytes.NewReader(append(result.Body, '\n'))); err != nil {
@@ -156,10 +188,7 @@ func chatHandler(adapter provider.Adapter, configuredModel, traceDir string, col
 			return
 		}
 		stopReason = "completed"
-		usage = result.Usage
 		success = true
-		elapsed := time.Since(started)
-		recordTraceLLM(recorder, model, started, elapsed, responseFinishReason(result.Body), result.Usage, result.Attempts)
 	}
 }
 
@@ -172,6 +201,8 @@ func recordTraceLLM(
 	finishReason string,
 	usage provider.Usage,
 	attempts int,
+	costYuan float64,
+	costNote string,
 ) {
 	if recorder == nil {
 		return
@@ -188,6 +219,8 @@ func recordTraceLLM(
 			Cached: usage.CachedTokens,
 		},
 		attempts,
+		costYuan,
+		costNote,
 	)
 	if err != nil {
 		log.Printf("写入请求 trace 模型事件失败：%v", err)

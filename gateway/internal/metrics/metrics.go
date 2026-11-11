@@ -3,6 +3,7 @@ package metrics
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"sync"
@@ -23,7 +24,7 @@ type modelStats struct {
 	inputTokens   uint64
 	outputTokens  uint64
 	cachedTokens  uint64
-	costYuan      float64
+	costUnits     uint64
 	requestTiming histogram
 }
 
@@ -83,7 +84,9 @@ func (m *Metrics) ObserveModel(
 	stats.inputTokens += uint64(max(inputTokens, 0))
 	stats.outputTokens += uint64(max(outputTokens, 0))
 	stats.cachedTokens += uint64(max(cachedTokens, 0))
-	stats.costYuan += costYuan
+	if costYuan > 0 && !math.IsNaN(costYuan) && !math.IsInf(costYuan, 0) {
+		stats.costUnits += uint64(math.Round(costYuan * 10_000))
+	}
 	stats.requestTiming.observe(duration.Seconds())
 }
 
@@ -150,7 +153,7 @@ func (m *Metrics) writeModelMetrics(w http.ResponseWriter) {
 		_, _ = fmt.Fprintf(w, "gateway_model_output_tokens_total{model=%s} %d\n", label, stats.outputTokens)
 		_, _ = fmt.Fprintf(w, "gateway_model_cached_input_tokens_total{model=%s} %d\n", label, stats.cachedTokens)
 		_, _ = fmt.Fprintf(w, "gateway_model_cost_yuan_total{model=%s} %s\n",
-			label, strconv.FormatFloat(stats.costYuan, 'f', 6, 64))
+			label, strconv.FormatFloat(float64(stats.costUnits)/10_000, 'f', 4, 64))
 		writeLabeledHistogram(w, "gateway_model_request_duration_seconds",
 			"Model request duration in seconds.", model, stats.requestTiming)
 	}

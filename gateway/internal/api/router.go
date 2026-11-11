@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/carder-coder/ai-agent/gateway/internal/config"
+	"github.com/carder-coder/ai-agent/gateway/internal/cost"
 	"github.com/carder-coder/ai-agent/gateway/internal/metrics"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider/doubao"
@@ -42,7 +43,13 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 	collector := metrics.New()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
-	mux.HandleFunc("/v1/chat/completions", chatHandler(guardedAdapter, cfg.Model, cfg.TraceDir, collector))
+	mux.HandleFunc("/v1/chat/completions", chatHandler(
+		guardedAdapter,
+		cfg.Model,
+		cfg.TraceDir,
+		collector,
+		cost.Prices{Input: cfg.PriceIn, Output: cfg.PriceOut, Cached: cfg.PriceCached},
+	))
 	mux.Handle("/metrics", collector)
 	// 从外到内依次采集指标、注入 trace、限流、处理幂等请求并恢复 panic。
 	handler := NewIdempotencyCache().Wrap(recoveryMiddleware(mux))
