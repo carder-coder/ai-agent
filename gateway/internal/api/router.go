@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/carder-coder/ai-agent/gateway/internal/config"
+	"github.com/carder-coder/ai-agent/gateway/internal/metrics"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider/doubao"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider/mock"
@@ -28,11 +29,12 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 		return nil, err
 	}
 
+	collector := metrics.New()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/v1/chat/completions", chatHandler(adapter, cfg.Model))
-	mux.HandleFunc("/metrics", notImplementedHandler)
-	return mux, nil
+	mux.Handle("/metrics", collector)
+	return collector.Wrap(mux), nil
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -45,8 +47,4 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write([]byte("{\"status\":\"ok\"}\n")); err != nil {
 		return
 	}
-}
-
-func notImplementedHandler(w http.ResponseWriter, _ *http.Request) {
-	writeError(w, http.StatusNotImplemented, "endpoint is not implemented yet", "server_error", "not_implemented")
 }

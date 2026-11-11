@@ -2,16 +2,19 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/carder-coder/ai-agent/gateway/internal/provider"
-	"github.com/carder-coder/ai-agent/gateway/internal/provider/doubao"
+	"github.com/carder-coder/ai-agent/gateway/internal/sse"
 )
 
 const maxRequestBytes = 1 << 20
@@ -43,10 +46,6 @@ func chatHandler(adapter provider.Adapter, configuredModel string) http.HandlerF
 			writeError(w, http.StatusBadRequest, validationError, "invalid_request_error", "invalid_request")
 			return
 		}
-		if stream {
-			writeError(w, http.StatusNotImplemented, "stream: streaming is not implemented yet", "server_error", "not_implemented")
-			return
-		}
 		model := strings.TrimSpace(configuredModel)
 		if model == "" {
 			model = requestedModel
@@ -61,16 +60,16 @@ func chatHandler(adapter provider.Adapter, configuredModel string) http.HandlerF
 			return
 		}
 
-		result, err := adapter.Chat(r.Context(), upstreamBody, false)
+		result, err := adapter.Chat(r.Context(), upstreamBody, stream)
 		if err != nil {
 			if r.Context().Err() != nil {
 				return
 			}
-			if errors.Is(err, doubao.ErrMissingAPIKey) {
-				writeError(w, http.StatusUnauthorized, err.Error(), "authentication_error", "invalid_api_key")
+			if errors.Is(err, provider.ErrAuthentication) {
+				writeError(w, http.StatusUnauthorized, "provider authentication failed", "authentication_error", "invalid_api_key")
 				return
 			}
-			if doubao.IsTimeout(err) {
+			if provider.IsTimeout(err) {
 				writeError(w, http.StatusGatewayTimeout, "upstream request timed out", "timeout", "upstream_timeout")
 				return
 			}
@@ -81,6 +80,14 @@ func chatHandler(adapter provider.Adapter, configuredModel string) http.HandlerF
 			writeUpstreamError(w, result)
 			return
 		}
+		if stream {
+			if result.Stream == nil {
+				writeError(w, http.StatusBadGateway, "upstream did not return a stream", "upstream_error", "invalid_upstream_response")
+				return
+			}
+			writeStreamResponse(w, r, result.Stream)
+			return
+		}
 		var response map[string]json.RawMessage
 		if err := json.Unmarshal(result.Body, &response); err != nil || response == nil {
 			writeError(w, http.StatusBadGateway, "upstream returned an invalid JSON response", "upstream_error", "invalid_upstream_response")
@@ -89,6 +96,113 @@ func chatHandler(adapter provider.Adapter, configuredModel string) http.HandlerF
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.Copy(w, bytes.NewReader(append(result.Body, '\n')))
+	}
+}
+
+func writeStreamResponse(w http.ResponseWriter, r *http.Request, stream provider.ChunkStream) {
+	defer func() {
+		if err := stream.Close(); err != nil {
+			log.Printf("关闭 provider 流失败：%v", err)
+		}
+	}()
+	writer, err := sse.NewWriter(w, r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "streaming is not supported by this server", "server_error", "streaming_unsupported")
+		return
+	}
+	if err := writer.Start(); err != nil {
+		if r.Context().Err() == nil {
+			writeError(w, http.StatusInternalServerError, "failed to start SSE response", "server_error", "stream_start_failed")
+		}
+		return
+	}
+
+	type nextResult struct {
+		chunk provider.Chunk
+		err   error
+	}
+	streamCtx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	events := make(chan nextResult, 1)
+	go func() {
+		defer close(events)
+		for {
+			chunk, err := stream.Next()
+			select {
+			case events <- nextResult{chunk: chunk, err: err}:
+			case <-streamCtx.Done():
+				return
+			}
+			if err != nil || chunk.Done {
+				return
+			}
+		}
+	}()
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			if err := writer.Heartbeat(); err != nil {
+				if r.Context().Err() == nil {
+					log.Printf("写 SSE 心跳失败：%v", err)
+				}
+				return
+			}
+		case next, ok := <-events:
+			if !ok {
+				writeStreamDone(writer)
+				return
+			}
+			if errors.Is(next.err, io.EOF) {
+				writeStreamDone(writer)
+				return
+			}
+			if next.err != nil {
+				if r.Context().Err() == nil {
+					log.Printf("读取 provider SSE 流失败：%v", next.err)
+					if err := writeStreamError(writer); err != nil {
+						log.Printf("写 SSE 错误事件失败：%v", err)
+					}
+				}
+				return
+			}
+			if err := writer.WriteData(next.chunk.Data); err != nil {
+				if r.Context().Err() == nil {
+					log.Printf("写 SSE 数据块失败：%v", err)
+				}
+				return
+			}
+			if next.chunk.Done {
+				return
+			}
+		}
+	}
+}
+
+func writeStreamError(writer *sse.Writer) error {
+	body, marshalErr := json.Marshal(errorEnvelope{
+		Error: apiError{
+			Message: "upstream stream failed",
+			Type:    "upstream_error",
+			Code:    "stream_error",
+		},
+	})
+	if marshalErr != nil {
+		return marshalErr
+	}
+	if writeErr := writer.WriteData(body); writeErr != nil {
+		return writeErr
+	}
+	return writer.WriteData([]byte("[DONE]"))
+}
+
+func writeStreamDone(writer *sse.Writer) {
+	if err := writer.WriteData([]byte("[DONE]")); err != nil {
+		log.Printf("写 SSE 结束标记失败：%v", err)
 	}
 }
 

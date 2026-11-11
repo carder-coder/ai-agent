@@ -139,20 +139,6 @@ func TestChatMapsUpstreamUnauthorized(t *testing.T) {
 	}
 }
 
-func TestChatRejectsStreamingUntilSSEIsImplemented(t *testing.T) {
-	body := `{"model":"chat","messages":[{"role":"user","content":"hi"}],"stream":true}`
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
-	response := httptest.NewRecorder()
-	newTestRouter(t, config.Config{}).ServeHTTP(response, request)
-
-	if response.Code != http.StatusNotImplemented {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body)
-	}
-	if !strings.Contains(response.Body.String(), "stream:") {
-		t.Fatalf("expected field-level streaming message, got %s", response.Body)
-	}
-}
-
 func TestChatUsesConfiguredMockProvider(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
 		`{"model":"public-model","messages":[{"role":"user","content":"hi"}]}`,
@@ -177,6 +163,37 @@ func TestChatUsesConfiguredMockProvider(t *testing.T) {
 	if result.Model != "public-model" || len(result.Choices) != 1 ||
 		result.Choices[0].Message.Content != "mock response" {
 		t.Fatalf("unexpected mock response: %+v", result)
+	}
+}
+
+func TestChatStreamsMockChunksAndRecordsFirstByte(t *testing.T) {
+	handler := newTestRouter(t, config.Config{Provider: "mock"})
+	body := `{"model":"chat","messages":[{"role":"user","content":"hi"}],"stream":true}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	started := time.Now()
+	handler.ServeHTTP(response, request)
+	firstByte := time.Since(started)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body)
+	}
+	if firstByte >= 800*time.Millisecond {
+		t.Fatalf("mock first byte took %s, want under 800ms", firstByte)
+	}
+	if response.Header().Get("Content-Type") != "text/event-stream; charset=utf-8" {
+		t.Fatalf("Content-Type = %q", response.Header().Get("Content-Type"))
+	}
+	streamBody := response.Body.String()
+	if !strings.Contains(streamBody, `data: {"id":"chatcmpl-mock"`) ||
+		!strings.Contains(streamBody, "data: [DONE]\n\n") {
+		t.Fatalf("unexpected stream body: %s", streamBody)
+	}
+
+	metricsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(metricsResponse.Body.String(), "gateway_first_byte_seconds_count 1") {
+		t.Fatalf("first-byte metric not recorded:\n%s", metricsResponse.Body)
 	}
 }
 

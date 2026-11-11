@@ -7,18 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/carder-coder/ai-agent/gateway/internal/config"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider"
+	"github.com/carder-coder/ai-agent/gateway/internal/sse"
 )
 
 const maxResponseBytes = 4 << 20
-
-var ErrMissingAPIKey = errors.New("缺少 ARK_API_KEY")
-var ErrStreamNotImplemented = errors.New("豆包 SSE streaming is not implemented yet")
 
 type Client struct {
 	apiKey string
@@ -42,24 +40,8 @@ func NewClient(cfg config.Config) *Client {
 var _ provider.Adapter = (*Client)(nil)
 
 func (c *Client) Chat(ctx context.Context, body []byte, stream bool) (provider.Response, error) {
-	if stream {
-		return provider.Response{}, ErrStreamNotImplemented
-	}
-	result, err := c.Complete(ctx, body)
-	if err != nil {
-		return provider.Response{}, err
-	}
-	return provider.Response{
-		StatusCode: result.StatusCode,
-		Body:       result.Body,
-		RetryAfter: result.RetryAfter,
-		Usage:      parseUsage(result.Body),
-	}, nil
-}
-
-func (c *Client) Complete(ctx context.Context, body []byte) (provider.Response, error) {
 	if strings.TrimSpace(c.apiKey) == "" {
-		return provider.Response{}, ErrMissingAPIKey
+		return provider.Response{}, fmt.Errorf("%w: 缺少 ARK_API_KEY", provider.ErrAuthentication)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
 	if err != nil {
@@ -67,11 +49,27 @@ func (c *Client) Complete(ctx context.Context, body []byte) (provider.Response, 
 	}
 	request.Header.Set("Authorization", "Bearer "+c.apiKey)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "application/json")
+	if stream {
+		request.Header.Set("Accept", "text/event-stream")
+	} else {
+		request.Header.Set("Accept", "application/json")
+	}
 
 	response, err := c.http.Do(request)
 	if err != nil {
 		return provider.Response{}, err
+	}
+	result := provider.Response{
+		StatusCode: response.StatusCode,
+		RetryAfter: response.Header.Get("Retry-After"),
+	}
+	if stream && response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+		if !strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") {
+			response.Body.Close()
+			return provider.Response{}, errors.New("豆包流式响应 Content-Type 不是 text/event-stream")
+		}
+		result.Stream = &chatStream{body: response.Body, reader: sse.NewReader(response.Body)}
+		return result, nil
 	}
 	defer response.Body.Close()
 
@@ -82,11 +80,50 @@ func (c *Client) Complete(ctx context.Context, body []byte) (provider.Response, 
 	if len(responseBody) > maxResponseBytes {
 		return provider.Response{}, fmt.Errorf("豆包响应超过 %d 字节上限", maxResponseBytes)
 	}
-	return provider.Response{
-		StatusCode: response.StatusCode,
-		Body:       responseBody,
-		RetryAfter: response.Header.Get("Retry-After"),
-	}, nil
+	result.Body = responseBody
+	if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+		result.Usage = parseUsage(responseBody)
+	}
+	return result, nil
+}
+
+type chatStream struct {
+	body   io.ReadCloser
+	reader *sse.Reader
+	usage  provider.Usage
+	once   sync.Once
+	err    error
+}
+
+func (s *chatStream) Next() (provider.Chunk, error) {
+	event, err := s.reader.Next()
+	if err != nil {
+		return provider.Chunk{}, err
+	}
+	if event.Done {
+		return provider.Chunk{Data: []byte("[DONE]"), Done: true}, nil
+	}
+	if usage := parseUsage([]byte(event.Data)); usage.TotalTokens > 0 {
+		s.usage = usage
+	}
+	var chunk struct {
+		Choices []json.RawMessage `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(event.Data), &chunk); err != nil {
+		return provider.Chunk{}, fmt.Errorf("解析豆包 SSE JSON 失败：%w", err)
+	}
+	return provider.Chunk{Data: []byte(event.Data), Content: len(chunk.Choices) > 0}, nil
+}
+
+func (s *chatStream) Usage() provider.Usage {
+	return s.usage
+}
+
+func (s *chatStream) Close() error {
+	s.once.Do(func() {
+		s.err = s.body.Close()
+	})
+	return s.err
 }
 
 func parseUsage(body []byte) provider.Usage {
@@ -109,12 +146,4 @@ func parseUsage(body []byte) provider.Usage {
 		TotalTokens:  response.Usage.TotalTokens,
 		CachedTokens: response.Usage.PromptDetails.CachedTokens,
 	}
-}
-
-func IsTimeout(err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	var netErr net.Error
-	return errors.As(err, &netErr) && netErr.Timeout()
 }

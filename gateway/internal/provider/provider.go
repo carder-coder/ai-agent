@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 )
+
+var ErrAuthentication = errors.New("provider authentication failed")
 
 type Usage struct {
 	InputTokens  int `json:"input_tokens"`
@@ -16,7 +19,9 @@ type Usage struct {
 }
 
 type Chunk struct {
-	Data []byte
+	Data    []byte
+	Content bool
+	Done    bool
 }
 
 type ChunkStream interface {
@@ -71,4 +76,12 @@ func (r *Registry) Get(name string) (Adapter, error) {
 		return nil, fmt.Errorf("provider %q is not registered", name)
 	}
 	return adapter, nil
+}
+
+func IsTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }

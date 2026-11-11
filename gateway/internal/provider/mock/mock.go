@@ -65,9 +65,9 @@ func (m *Adapter) Chat(ctx context.Context, body []byte, stream bool) (provider.
 			StatusCode: http.StatusOK,
 			Stream: &mockStream{
 				chunks: []provider.Chunk{
-					{Data: []byte(`{"id":"chatcmpl-mock","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"mock"},"finish_reason":null}]}`)},
+					{Data: []byte(`{"id":"chatcmpl-mock","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"mock"},"finish_reason":null}]}`), Content: true},
 					{Data: []byte(`{"id":"chatcmpl-mock","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)},
-					{Data: []byte("[DONE]")},
+					{Data: []byte("[DONE]"), Done: true},
 				},
 				usage: usage,
 			},
