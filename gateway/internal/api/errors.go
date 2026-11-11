@@ -1,3 +1,4 @@
+// 本文件定义统一的 OpenAI 风格错误响应结构和编码方法。
 package api
 
 import (
@@ -15,6 +16,7 @@ type apiError struct {
 	Code    string `json:"code"`
 }
 
+// writeError 将内部错误编码为统一的 OpenAI 风格 JSON envelope。
 func writeError(w http.ResponseWriter, status int, message, errorType, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

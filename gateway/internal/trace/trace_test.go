@@ -1,3 +1,4 @@
+// 本文件验证 trace JSONL 字段兼容性、ID 校验和防覆盖行为。
 package trace
 
 import (

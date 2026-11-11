@@ -1,3 +1,4 @@
+// 本文件验证 Mock Provider 的错误、延迟取消和流式响应行为。
 package mock
 
 import (

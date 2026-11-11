@@ -1,3 +1,4 @@
+// 本文件验证配置默认值、环境变量覆盖和非法参数拒绝行为。
 package config
 
 import (

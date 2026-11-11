@@ -1,3 +1,4 @@
+// 本文件读取并校验网关及模型服务配置，支持进程环境变量和根目录 .env。
 package config
 
 import (
@@ -13,6 +14,7 @@ import (
 
 const defaultBaseURL = "https://ark.cn-beijing.volces.com/api/v3"
 
+// Config 保存启动网关及调用 Provider 所需的配置快照。
 type Config struct {
 	Provider       string
 	Port           int
@@ -28,6 +30,7 @@ type Config struct {
 	PriceCached    float64
 }
 
+// Load 读取 .env 与进程环境变量，校验参数后返回配置。
 func Load() (Config, error) {
 	if err := loadRootEnv(); err != nil {
 		return Config{}, err
@@ -90,11 +93,13 @@ func Load() (Config, error) {
 	}, nil
 }
 
+// Address 返回供 HTTP server 监听的 host-port 地址。
 func (c Config) Address() string {
 	return fmt.Sprintf(":%d", c.Port)
 }
 
 func loadRootEnv() error {
+	// 从 gateway/ 或仓库根目录启动都能找到根 .env；已存在的进程环境变量优先。
 	for _, path := range []string{".env", filepath.Join("..", ".env")} {
 		file, err := os.Open(path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -116,6 +121,7 @@ func loadRootEnv() error {
 	return nil
 }
 
+// parseEnv 解析简单 .env 语法，且不覆盖已由进程设置的变量。
 func parseEnv(file *os.File) error {
 	scanner := bufio.NewScanner(file)
 	for lineNo := 1; scanner.Scan(); lineNo++ {

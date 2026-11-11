@@ -1,3 +1,4 @@
+// 本文件实现 OpenAI 兼容聊天请求的校验、上游调用、错误映射和流式响应。
 package api
 
 import (
@@ -27,6 +28,7 @@ type chatMessage struct {
 	ToolCall json.RawMessage `json:"tool_calls"`
 }
 
+// chatHandler 校验聊天请求并调用 Provider；成功请求会记录兼容重放器的 trace。
 func chatHandler(adapter provider.Adapter, configuredModel, traceDir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -143,6 +145,7 @@ func chatHandler(adapter provider.Adapter, configuredModel, traceDir string) htt
 	}
 }
 
+// recordTraceLLM 将 Provider 用量和延迟写入当前请求的 trace。
 func recordTraceLLM(
 	recorder *trace.Recorder,
 	model string,
@@ -173,6 +176,7 @@ func recordTraceLLM(
 	}
 }
 
+// responseFinishReason 从非流式 Chat Completions 响应中提取结束原因。
 func responseFinishReason(body []byte) string {
 	var response struct {
 		Choices []struct {
@@ -186,6 +190,7 @@ func responseFinishReason(body []byte) string {
 	return "stop"
 }
 
+// writeStreamResponse 将上游 chunk 逐个写入 SSE，并返回首字节耗时、结束原因和完成状态。
 func writeStreamResponse(w http.ResponseWriter, r *http.Request, stream provider.ChunkStream, started time.Time) (firstByte time.Duration, finishReason string, completed bool) {
 	defer func() {
 		if err := stream.Close(); err != nil {
@@ -211,6 +216,7 @@ func writeStreamResponse(w http.ResponseWriter, r *http.Request, stream provider
 	streamCtx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	events := make(chan nextResult, 1)
+	// 单独读取上游流，使处理协程能响应客户端取消并停止等待下一块数据。
 	go func() {
 		defer close(events)
 		for {
@@ -289,6 +295,7 @@ func streamFinishReason(body []byte) string {
 	return ""
 }
 
+// writeStreamError 在 SSE 已开始后发送 OpenAI 风格错误事件及结束标记。
 func writeStreamError(writer *sse.Writer) error {
 	body, marshalErr := json.Marshal(errorEnvelope{
 		Error: apiError{
@@ -312,6 +319,7 @@ func writeStreamDone(writer *sse.Writer) {
 	}
 }
 
+// validateChatRequest 检查 OpenAI 兼容请求的必要字段，并返回可继续转发的原始 JSON 字段。
 func validateChatRequest(body []byte) (map[string]json.RawMessage, string, bool, string) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
@@ -372,6 +380,7 @@ func setJSONField(fields map[string]json.RawMessage, key, value string) error {
 	return nil
 }
 
+// writeUpstreamError 将上游 HTTP 状态和错误消息映射为网关统一错误响应。
 func writeUpstreamError(w http.ResponseWriter, result provider.Response) {
 	status := http.StatusBadGateway
 	errorType, code := "upstream_error", "upstream_error"
@@ -396,6 +405,7 @@ func writeUpstreamError(w http.ResponseWriter, result provider.Response) {
 	writeError(w, status, message, errorType, code)
 }
 
+// validRetryAfter 仅透传符合秒数或 HTTP 日期格式的 Retry-After 值。
 func validRetryAfter(value string) string {
 	value = strings.TrimSpace(value)
 	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {

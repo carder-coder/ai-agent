@@ -1,3 +1,4 @@
+// 本文件提供可配置的本地 Mock Provider，用于离线验证与测试。
 package mock
 
 import (
@@ -12,26 +13,31 @@ import (
 	"github.com/carder-coder/ai-agent/gateway/internal/provider"
 )
 
+// Options 配置 Mock Provider 的延迟、状态码和中断行为。
 type Options struct {
 	Delay      time.Duration
 	StatusCode int
 	Interrupt  bool
 }
 
+// Adapter 返回固定的聊天结果，用于离线运行和测试。
 type Adapter struct {
 	options Options
 }
 
 var _ provider.Adapter = (*Adapter)(nil)
 
+// New 创建默认延迟为 5 毫秒的 Mock Provider。
 func New() *Adapter {
 	return NewWithOptions(Options{Delay: 5 * time.Millisecond})
 }
 
+// NewWithOptions 按给定选项创建 Mock Provider。
 func NewWithOptions(options Options) *Adapter {
 	return &Adapter{options: options}
 }
 
+// Chat 按配置返回模拟 JSON 响应、SSE 流或上游错误。
 func (m *Adapter) Chat(ctx context.Context, body []byte, stream bool) (provider.Response, error) {
 	if m.options.Delay > 0 {
 		timer := time.NewTimer(m.options.Delay)

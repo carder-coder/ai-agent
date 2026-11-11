@@ -1,3 +1,4 @@
+// 本文件验证 SSE 数据事件、多行数据和末尾未终止事件的解析。
 package sse
 
 import (

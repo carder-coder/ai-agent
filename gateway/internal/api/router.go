@@ -1,3 +1,4 @@
+// 本文件装配 Provider、HTTP 路由、指标采集器和请求中间件。
 package api
 
 import (
@@ -13,6 +14,7 @@ import (
 	"github.com/carder-coder/ai-agent/gateway/internal/retry"
 )
 
+// NewRouter 根据配置装配 Provider、路由和中间件，返回可直接运行的 HTTP handler。
 func NewRouter(cfg config.Config) (http.Handler, error) {
 	if cfg.MaxConcurrent < 1 {
 		return nil, fmt.Errorf("GATEWAY_MAX_CONCURRENCY must be positive")
@@ -42,12 +44,14 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/v1/chat/completions", chatHandler(guardedAdapter, cfg.Model, cfg.TraceDir))
 	mux.Handle("/metrics", collector)
+	// 从外到内依次采集指标、注入 trace、限流、处理幂等请求并恢复 panic。
 	handler := NewIdempotencyCache().Wrap(recoveryMiddleware(mux))
 	handler = concurrencyMiddleware(cfg.MaxConcurrent, handler)
 	handler = requestLoggingMiddleware(handler)
 	return collector.Wrap(handler), nil
 }
 
+// healthHandler 为负载均衡器提供只接受 GET 的存活检查。
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")

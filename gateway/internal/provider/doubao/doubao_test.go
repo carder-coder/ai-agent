@@ -1,3 +1,4 @@
+// 本文件验证豆包适配器的 SSE 解析、用量提取和响应格式检查。
 package doubao
 
 import (

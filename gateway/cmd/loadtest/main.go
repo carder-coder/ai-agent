@@ -1,3 +1,4 @@
+// 本文件实现可配置并发压测命令，统计请求延迟分位数和错误率。
 package main
 
 import (
@@ -18,6 +19,7 @@ type sample struct {
 	err     error
 }
 
+// main 解析压测参数、执行请求并输出延迟分位数及错误率。
 func main() {
 	requests := flag.Int("n", 200, "total number of requests")
 	concurrency := flag.Int("c", 50, "maximum concurrent requests")
@@ -63,10 +65,12 @@ func main() {
 	}
 }
 
+// runLoadTest 使用固定数量的 worker 执行指定请求数并收集每次结果。
 func runLoadTest(ctx context.Context, client *http.Client, target string, requests, concurrency int) []sample {
 	if concurrency > requests {
 		concurrency = requests
 	}
+	// 固定 worker 数限制同时在途请求，缓冲结果通道则避免 worker 被汇总协程阻塞。
 	jobs := make(chan struct{})
 	results := make(chan sample, requests)
 	for worker := 0; worker < concurrency; worker++ {
@@ -88,6 +92,7 @@ func runLoadTest(ctx context.Context, client *http.Client, target string, reques
 	return samples
 }
 
+// sendRequest 执行一次聊天请求并记录完整响应耗时及非成功结果。
 func sendRequest(ctx context.Context, client *http.Client, target string) sample {
 	started := time.Now()
 	req, err := http.NewRequestWithContext(
@@ -116,12 +121,14 @@ func sendRequest(ctx context.Context, client *http.Client, target string) sample
 	return sample{latency: time.Since(started), err: err}
 }
 
+// percentileMilliseconds 按 nearest-rank 计算耗时分位数并转换为毫秒。
 func percentileMilliseconds(values []time.Duration, percentile float64) float64 {
 	if len(values) == 0 {
 		return 0
 	}
 	sorted := append([]time.Duration(nil), values...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	// 使用 nearest-rank 口径，确保小样本的高分位数不会落在未观测值之间。
 	index := int(float64(len(sorted))*percentile+0.999999) - 1
 	if index < 0 {
 		index = 0

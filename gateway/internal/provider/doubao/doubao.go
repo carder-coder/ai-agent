@@ -1,3 +1,4 @@
+// 本文件实现豆包 Chat Completions HTTP 适配器及其 SSE 响应流。
 package doubao
 
 import (
@@ -18,12 +19,14 @@ import (
 
 const maxResponseBytes = 4 << 20
 
+// Client 通过豆包兼容的 Chat Completions API 执行模型请求。
 type Client struct {
 	apiKey string
 	url    string
 	http   *http.Client
 }
 
+// NewClient 根据网关配置创建豆包客户端。
 func NewClient(cfg config.Config) *Client {
 	return &Client{
 		apiKey: cfg.APIKey,
@@ -39,6 +42,7 @@ func NewClient(cfg config.Config) *Client {
 
 var _ provider.Adapter = (*Client)(nil)
 
+// Chat 调用豆包 Chat Completions API，并按需返回 JSON 响应或 SSE 流。
 func (c *Client) Chat(ctx context.Context, body []byte, stream bool) (provider.Response, error) {
 	if strings.TrimSpace(c.apiKey) == "" {
 		return provider.Response{}, fmt.Errorf("%w: 缺少 ARK_API_KEY", provider.ErrAuthentication)
@@ -95,6 +99,7 @@ type chatStream struct {
 	err    error
 }
 
+// Next 解析下一条 SSE 事件并更新流中携带的用量信息。
 func (s *chatStream) Next() (provider.Chunk, error) {
 	event, err := s.reader.Next()
 	if err != nil {
@@ -126,6 +131,7 @@ func (s *chatStream) Close() error {
 	return s.err
 }
 
+// parseUsage 从兼容 Chat Completions 的 JSON 中提取 token 用量。
 func parseUsage(body []byte) provider.Usage {
 	var response struct {
 		Usage struct {

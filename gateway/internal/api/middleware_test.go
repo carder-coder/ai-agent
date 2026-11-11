@@ -1,3 +1,4 @@
+// 本文件验证请求中间件的幂等、恢复、trace 注入和限流行为。
 package api
 
 import (

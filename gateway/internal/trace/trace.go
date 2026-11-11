@@ -1,3 +1,4 @@
+// 本文件将网关模型调用记录为与 Python replay.py 兼容的 JSONL 事件。
 package trace
 
 import (
@@ -12,6 +13,7 @@ import (
 	"time"
 )
 
+// Usage 使用 replay.py 约定的字段名记录输入、输出、总量和缓存 token。
 type Usage struct {
 	In     int `json:"in"`
 	Out    int `json:"out"`
@@ -19,6 +21,7 @@ type Usage struct {
 	Cached int `json:"cached"`
 }
 
+// Recorder 将单次网关请求的模型调用和汇总写入 JSONL 文件。
 type Recorder struct {
 	mu     sync.Mutex
 	file   *os.File
@@ -26,6 +29,7 @@ type Recorder struct {
 	closed bool
 }
 
+// NewRecorder 在 directory 中独占创建 trace 文件并写入 run_start 事件。
 func NewRecorder(directory, runID, task string) (*Recorder, error) {
 	if runID == "" {
 		var err error
@@ -44,6 +48,7 @@ func NewRecorder(directory, runID, task string) (*Recorder, error) {
 		return nil, fmt.Errorf("create trace directory: %w", err)
 	}
 	path := filepath.Join(directory, runID+".jsonl")
+	// 独占创建避免同一 trace ID 覆盖已有记录；文件仅当前用户可读写。
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("create trace file: %w", err)
@@ -65,10 +70,12 @@ func NewRecorder(directory, runID, task string) (*Recorder, error) {
 	return recorder, nil
 }
 
+// Path 返回当前 recorder 正在写入的 trace 文件路径。
 func (r *Recorder) Path() string {
 	return r.file.Name()
 }
 
+// RecordLLM 累计模型用量并写入与 Python replay.py 对齐的 llm 事件。
 func (r *Recorder) RecordLLM(
 	model string,
 	firstByteMS int64,
@@ -86,6 +93,7 @@ func (r *Recorder) RecordLLM(
 	r.usage.Out += usage.Out
 	r.usage.Total += usage.Total
 	r.usage.Cached += usage.Cached
+	// 网关每个请求只记录一次模型调用；本周尚未接入计费，因此成本显式记零。
 	return r.writeEventLocked("llm", map[string]any{
 		"step":          1,
 		"model":         model,
@@ -100,6 +108,7 @@ func (r *Recorder) RecordLLM(
 	})
 }
 
+// End 写入包含累计用量的 run_end 事件并关闭 trace 文件。
 func (r *Recorder) End(stopReason string, steps int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

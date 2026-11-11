@@ -1,3 +1,4 @@
+// 本文件验证聊天请求生成的 JSONL trace 可被重放器读取且不泄露请求正文。
 package api
 
 import (

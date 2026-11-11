@@ -1,3 +1,4 @@
+// 本文件验证 SSE 写入器的逐事件 flush、心跳和取消处理。
 package sse
 
 import (

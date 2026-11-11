@@ -1,3 +1,4 @@
+// 本文件验证 Provider 注册表的注册、查询及无效输入处理。
 package provider
 
 import (

@@ -1,3 +1,4 @@
+// 本文件采集网关请求指标，并以 Prometheus 文本格式提供 /metrics。
 package metrics
 
 import (
@@ -16,6 +17,7 @@ type histogram struct {
 	sum     float64
 }
 
+// Metrics 并发安全地累计 HTTP 请求、错误、延迟和首字节观测值。
 type Metrics struct {
 	mu               sync.RWMutex
 	startedAt        time.Time
@@ -26,6 +28,7 @@ type Metrics struct {
 	firstByteLatency histogram
 }
 
+// New 创建并初始化一组网关指标。
 func New() *Metrics {
 	now := time.Now()
 	return &Metrics{
@@ -35,6 +38,7 @@ func New() *Metrics {
 	}
 }
 
+// Wrap 记录被包装 handler 的状态码、总耗时和首个响应字节时间。
 func (m *Metrics) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
@@ -48,6 +52,7 @@ func (m *Metrics) Wrap(next http.Handler) http.Handler {
 	})
 }
 
+// ServeHTTP 以 Prometheus 文本格式输出指标，仅允许 GET 请求。
 func (m *Metrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -60,6 +65,7 @@ func (m *Metrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if window > time.Minute {
 		window = time.Minute
 	}
+	// QPS 使用最近一分钟内完成的请求数；服务启动未满一分钟时按实际运行时长计算。
 	qps := float64(0)
 	if window > 0 {
 		qps = float64(len(m.recentRequests)) / window.Seconds()
@@ -99,6 +105,7 @@ func (m *Metrics) observe(duration, firstByte time.Duration, hasFirstByte bool, 
 func (h *histogram) observe(value float64) {
 	h.count++
 	h.sum += value
+	// Prometheus histogram 的桶是累积计数，同一次观测会计入所有不小于它的边界。
 	for i, bound := range histogramBounds {
 		if value <= bound {
 			h.buckets[i]++

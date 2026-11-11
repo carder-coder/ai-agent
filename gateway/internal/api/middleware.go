@@ -1,3 +1,4 @@
+// 本文件提供幂等缓存、panic 恢复、请求日志和并发限制中间件。
 package api
 
 import (
@@ -37,16 +38,19 @@ type idempotencyEntry struct {
 	response    cachedResponse
 }
 
+// IdempotencyCache 保存有界、进程内的聊天响应副本，用于抑制重复请求。
 type IdempotencyCache struct {
 	mu         sync.Mutex
 	entries    map[string]*idempotencyEntry
 	cachedSize int
 }
 
+// NewIdempotencyCache 创建空的内存幂等缓存。
 func NewIdempotencyCache() *IdempotencyCache {
 	return &IdempotencyCache{entries: make(map[string]*idempotencyEntry)}
 }
 
+// Wrap 为聊天请求应用幂等键；同键并发请求共用首个请求结果。
 func (c *IdempotencyCache) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("Idempotency-Key")
@@ -71,6 +75,7 @@ func (c *IdempotencyCache) Wrap(next http.Handler) http.Handler {
 		r.ContentLength = int64(len(body))
 
 		fingerprint := requestFingerprint(r, body)
+		// 将幂等键限定在凭证 scope 内，避免不同调用方意外共享响应。
 		scope := sha256.Sum256([]byte(r.Header.Get("Authorization")))
 		cacheKey := hex.EncodeToString(scope[:]) + ":" + key
 		c.mu.Lock()
@@ -87,6 +92,7 @@ func (c *IdempotencyCache) Wrap(next http.Handler) http.Handler {
 			case <-r.Context().Done():
 				return
 			case <-entry.done:
+				// 同键并发请求等待首次执行；不可回放时拒绝重发，避免重复计费。
 				if !entry.response.replayable {
 					writeError(w, http.StatusConflict, "original response is too large to replay; request was not repeated", "invalid_request_error", "idempotency_result_not_replayable")
 					return
@@ -136,6 +142,7 @@ func (c *IdempotencyCache) Wrap(next http.Handler) http.Handler {
 		if snapshot.replayable && c.cachedSize+len(snapshot.body) <= maxIdempotencyCacheBytes {
 			c.cachedSize += len(snapshot.body)
 		} else {
+			// 超过单条或总缓存上限时保留幂等记录，但不保存正文以供重放。
 			snapshot.replayable = false
 			snapshot.body = nil
 		}
@@ -146,6 +153,7 @@ func (c *IdempotencyCache) Wrap(next http.Handler) http.Handler {
 	})
 }
 
+// purgeExpiredLocked 清理已完成且过期的缓存项；调用方必须持有缓存锁。
 func (c *IdempotencyCache) purgeExpiredLocked(now time.Time) {
 	for key, entry := range c.entries {
 		select {
@@ -159,6 +167,7 @@ func (c *IdempotencyCache) purgeExpiredLocked(now time.Time) {
 	}
 }
 
+// validIdempotencyKey 限制键为 1 到 255 个可见 ASCII 字符。
 func validIdempotencyKey(key string) bool {
 	if len(key) == 0 || len(key) > 255 {
 		return false
@@ -171,6 +180,7 @@ func validIdempotencyKey(key string) bool {
 	return true
 }
 
+// requestFingerprint 将 HTTP 方法、路径和请求正文组合为请求指纹。
 func requestFingerprint(r *http.Request, body []byte) string {
 	hash := sha256.New()
 	_, _ = fmt.Fprintf(hash, "%s\n%s\n", r.Method, r.URL.RequestURI())
@@ -178,6 +188,7 @@ func requestFingerprint(r *http.Request, body []byte) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
+// replayResponse 将缓存状态、允许重放的响应头及正文写回客户端。
 func replayResponse(w http.ResponseWriter, response cachedResponse) {
 	for name, values := range response.headers {
 		for _, value := range values {
@@ -241,6 +252,7 @@ func (w *flushCaptureWriter) Flush() {
 	w.flusher.Flush()
 }
 
+// recoveryMiddleware 将 handler panic 转换为 JSON 错误或 SSE 错误事件。
 func recoveryMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		responseWriter, tracked := trackedRecoveryWriter(w)
@@ -250,6 +262,7 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 				if !tracked.wroteHeader {
 					writeError(tracked, http.StatusInternalServerError, "internal server error", "server_error", "internal_error")
 				} else if strings.HasPrefix(tracked.Header().Get("Content-Type"), "text/event-stream") {
+					// SSE 响应头已发送，不能再改 HTTP 状态；改为发错误事件并结束流。
 					_, _ = io.WriteString(tracked, "data: {\"error\":{\"message\":\"internal server error\",\"type\":\"server_error\",\"code\":\"internal_error\"}}\n\ndata: [DONE]\n\n")
 					if flusher, ok := responseWriter.(http.Flusher); ok {
 						flusher.Flush()
@@ -261,6 +274,7 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// requestLoggingMiddleware 生成请求 ID、注入 context，并记录不含凭证的请求摘要。
 func requestLoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id, err := trace.NewID()
@@ -284,7 +298,9 @@ func requestLoggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// concurrencyMiddleware 限制同时处理的请求数；超限请求立即收到 503。
 func concurrencyMiddleware(limit int, next http.Handler) http.Handler {
+	// 使用非阻塞信号量，在达到上限时快速返回 503，不额外排队占用连接。
 	semaphore := make(chan struct{}, limit)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {

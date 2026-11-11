@@ -1,3 +1,4 @@
+// 本文件验证请求计数、错误计数、延迟和首字节指标的输出。
 package metrics
 
 import (
