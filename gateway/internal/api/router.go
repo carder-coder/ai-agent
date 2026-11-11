@@ -85,6 +85,7 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 		cfg.BudgetMaxOutputTokens,
 	))
 	mux.HandleFunc("/v1/cache/feedback", cacheFeedbackHandler(semanticCache, collector))
+	mux.HandleFunc("/cost-report", costReportHandler(collector))
 	mux.Handle("/metrics", collector)
 	// 从外到内依次采集指标、注入 trace、限流、处理幂等请求并恢复 panic。
 	handler := NewIdempotencyCache().Wrap(recoveryMiddleware(mux))

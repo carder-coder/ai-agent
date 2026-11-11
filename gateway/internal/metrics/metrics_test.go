@@ -2,6 +2,7 @@
 package metrics
 
 import (
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,6 +31,39 @@ func TestMetricsExposeRequestsErrorsAndLatency(t *testing.T) {
 	}
 	if response.Header().Get("Content-Type") != "text/plain; version=0.0.4; charset=utf-8" {
 		t.Fatalf("Content-Type = %q", response.Header().Get("Content-Type"))
+	}
+}
+
+func TestCostReportIncludesUnitCostModelSharesAndCacheRatio(t *testing.T) {
+	metrics := New()
+	metrics.ObserveModel("economy", time.Second, 100, 50, 0, 0.03, true)
+	metrics.ObserveModel("main", time.Second, 100, 50, 0, 0.07, true)
+	metrics.ObserveCacheLookup(false)
+	metrics.ObserveCacheLookup(false)
+	metrics.ObserveCacheLookup(false)
+	metrics.ObserveCacheLookup(true)
+
+	report := metrics.CostReport()
+	if report.ConversationCount != 2 || report.TotalCostYuan != 0.1 ||
+		math.Abs(report.CostPer1000ConversationsYuan-50) > 1e-9 ||
+		math.Abs(report.SemanticCacheHitRatio-0.25) > 1e-9 {
+		t.Fatalf("unexpected cost report totals: %+v", report)
+	}
+	if len(report.ModelCostShares) != 2 ||
+		report.ModelCostShares[0].Model != "economy" ||
+		math.Abs(report.ModelCostShares[0].CostShare-0.3) > 1e-9 ||
+		report.ModelCostShares[1].Model != "main" ||
+		math.Abs(report.ModelCostShares[1].CostShare-0.7) > 1e-9 {
+		t.Fatalf("unexpected model cost shares: %+v", report.ModelCostShares)
+	}
+}
+
+func TestCostReportUsesZeroForAnEmptyWindow(t *testing.T) {
+	report := New().CostReport()
+	if report.ConversationCount != 0 || report.TotalCostYuan != 0 ||
+		report.CostPer1000ConversationsYuan != 0 || report.SemanticCacheHitRatio != 0 ||
+		len(report.ModelCostShares) != 0 {
+		t.Fatalf("unexpected empty cost report: %+v", report)
 	}
 }
 

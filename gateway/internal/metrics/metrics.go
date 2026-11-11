@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -26,6 +27,25 @@ type modelStats struct {
 	cachedTokens  uint64
 	costUnits     uint64
 	requestTiming histogram
+}
+
+// ModelCostShare 是成本报告中的模型请求数、成本和总成本占比。
+type ModelCostShare struct {
+	Model     string  `json:"model"`
+	Requests  uint64  `json:"requests"`
+	CostYuan  float64 `json:"cost_yuan"`
+	CostShare float64 `json:"cost_share"`
+}
+
+// CostReport 汇总当前进程启动以来的对话成本和语义缓存效果。
+type CostReport struct {
+	PeriodStart                  time.Time        `json:"period_start"`
+	GeneratedAt                  time.Time        `json:"generated_at"`
+	ConversationCount            uint64           `json:"conversation_count"`
+	TotalCostYuan                float64          `json:"total_cost_yuan"`
+	CostPer1000ConversationsYuan float64          `json:"cost_per_1000_conversations_yuan"`
+	ModelCostShares              []ModelCostShare `json:"model_cost_shares"`
+	SemanticCacheHitRatio        float64          `json:"semantic_cache_hit_ratio"`
 }
 
 // Metrics 并发安全地累计 HTTP 请求、错误、延迟和首字节观测值。
@@ -113,6 +133,46 @@ func (m *Metrics) ObserveCacheFeedback(correct bool) {
 	} else {
 		m.cacheIncorrect++
 	}
+}
+
+// CostReport 返回进程启动以来的每千次对话成本、模型成本占比和语义缓存命中率。
+func (m *Metrics) CostReport() CostReport {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	report := CostReport{
+		PeriodStart:     m.startedAt.UTC(),
+		GeneratedAt:     time.Now().UTC(),
+		ModelCostShares: make([]ModelCostShare, 0, len(m.models)),
+	}
+	var totalCostUnits uint64
+	for model, stats := range m.models {
+		report.ConversationCount += stats.requests
+		totalCostUnits += stats.costUnits
+		report.ModelCostShares = append(report.ModelCostShares, ModelCostShare{
+			Model:    model,
+			Requests: stats.requests,
+			CostYuan: float64(stats.costUnits) / 10_000,
+		})
+	}
+	report.TotalCostYuan = float64(totalCostUnits) / 10_000
+	if report.ConversationCount > 0 {
+		report.CostPer1000ConversationsYuan =
+			report.TotalCostYuan / float64(report.ConversationCount) * 1_000
+	}
+	if totalCostUnits > 0 {
+		for i := range report.ModelCostShares {
+			report.ModelCostShares[i].CostShare =
+				float64(m.models[report.ModelCostShares[i].Model].costUnits) / float64(totalCostUnits)
+		}
+	}
+	if m.cacheLookups > 0 {
+		report.SemanticCacheHitRatio = float64(m.cacheHits) / float64(m.cacheLookups)
+	}
+	sort.Slice(report.ModelCostShares, func(i, j int) bool {
+		return report.ModelCostShares[i].Model < report.ModelCostShares[j].Model
+	})
+	return report
 }
 
 // Wrap 记录被包装 handler 的状态码、总耗时和首个响应字节时间。
