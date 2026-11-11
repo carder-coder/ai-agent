@@ -29,8 +29,9 @@
 - 表6 的目录约定只覆盖 Python 骨架，并注明 `deploy/` 在阶段二建。Go 的目录规范需要本周自己定下来，写进 ADR。
 - 本机 `go version` 为 go1.25.3，`GOPATH` 在 `C:\Users\007\go`，可以直接开工。
 
-## 目录决策四条
+## 目录决策五条
 
+0. **不另起仓库，Go 仍放在 `ai_agent` 仓内。** 理由有三条：计划 1.7 已定"后面的项目都在骨架里扩目录，不另起新仓"，分仓等于自己推翻约定；跨语言共用一个仓，`.env` 的价格、trace 的 JSONL 字段、`scripts/replay.py` 这套核对工具才能只维护一份，分仓后第 4 周计费与第 5 周审计都要跨仓抄口径；实验记录与 ADR 按阶段连续编号，分仓会把"第 3 周为什么这么定"从时间线上切断。只有当网关要独立发版、被别的项目当依赖引用，或 CI 单次构建超过十分钟时，才值得拆出去单独建仓。
 1. **Go 用独立 module 放在 `gateway/`，不在根目录建 `go.mod`。** 根目录已有 `pyproject.toml`、`uv.lock`，再放一份 `go.mod` 与 `cmd/`、`internal/`，两个工具链的边界会混在一起（`go vet ./...` 与 `uv run pytest` 各自扫的范围重叠），排查"哪条命令扫到了什么"要多花时间。`gateway/go.mod` 的 module 路径写 `github.com/carder-coder/ai-agent/gateway`，导入路径自解释。
 2. **只建网关这条线的最小目录。** `/v1/tools/execute` 留到第 5 周、计费与路由留到第 4 周，本周不预建 `internal/tools`、`internal/cost`、`internal/cache`。空目录 git 也不跟踪，先建等于制造以后要删的空壳。
 3. **`deploy/` 按表6 在阶段二建，但本周只放网关一份。** 一份 `Dockerfile` 加一份 `docker-compose.yml`，等第 4 周有真实依赖（Redis、PostgreSQL）再往里加服务，不提前为 A4、A5 铺位。
