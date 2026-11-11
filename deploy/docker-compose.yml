@@ -1,0 +1,18 @@
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      GATEWAY_PROVIDER: ${GATEWAY_PROVIDER:-mock}
+      GATEWAY_PORT: "8080"
+      GATEWAY_TIMEOUT: ${GATEWAY_TIMEOUT:-30s}
+      GATEWAY_MAX_CONCURRENCY: ${GATEWAY_MAX_CONCURRENCY:-200}
+      GATEWAY_MAX_RETRIES: ${GATEWAY_MAX_RETRIES:-3}
+      GATEWAY_TRACE_DIR: /tmp/traces
+      ARK_API_KEY: ${ARK_API_KEY:-}
+      ARK_MODEL: ${ARK_MODEL:-}
+      ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    restart: unless-stopped

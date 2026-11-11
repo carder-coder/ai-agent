@@ -153,6 +153,10 @@ Python 是 Agent 侧，Go 是服务侧；Go module 位于 `gateway/`，在该目
 有界的 24 小时缓存，重启后清空；不要把它当跨实例分布式去重。
 网关会在响应 `X-Trace-ID` 中返回请求标识，并以 `GATEWAY_MAX_CONCURRENCY` 为并发上限；超过上限时返回 503。
 
+本地 mock 压测：先在一个终端设置 `GATEWAY_PROVIDER=mock` 并运行 `go run ./cmd/gateway`，
+再从 `gateway/` 目录运行 `go run ./cmd/loadtest --n 200 --c 200`。Docker Compose 部署入口为
+`docker compose -f deploy/docker-compose.yml up --build`；Compose 默认使用 mock，不会调用真实模型。
+
 ## 远程仓库
 
 origin 指向 https://github.com/carder-coder/ai-agent.git，主分支 main。
