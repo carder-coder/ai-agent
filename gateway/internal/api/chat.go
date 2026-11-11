@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/carder-coder/ai-agent/gateway/internal/metrics"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider"
 	"github.com/carder-coder/ai-agent/gateway/internal/retry"
 	"github.com/carder-coder/ai-agent/gateway/internal/sse"
@@ -29,7 +30,7 @@ type chatMessage struct {
 }
 
 // chatHandler 校验聊天请求并调用 Provider；成功请求会记录兼容重放器的 trace。
-func chatHandler(adapter provider.Adapter, configuredModel, traceDir string) http.HandlerFunc {
+func chatHandler(adapter provider.Adapter, configuredModel, traceDir string, collector *metrics.Metrics) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")
@@ -65,6 +66,19 @@ func chatHandler(adapter provider.Adapter, configuredModel, traceDir string) htt
 		}
 
 		started := time.Now()
+		var usage provider.Usage
+		success := false
+		defer func() {
+			collector.ObserveModel(
+				model,
+				time.Since(started),
+				usage.InputTokens,
+				usage.OutputTokens,
+				usage.CachedTokens,
+				0,
+				success,
+			)
+		}()
 		recorder, traceErr := trace.NewRecorder(traceDir, trace.IDFromContext(r.Context()), "POST /v1/chat/completions")
 		if traceErr != nil {
 			log.Printf("创建请求 trace 失败：%v", traceErr)
@@ -123,7 +137,9 @@ func chatHandler(adapter provider.Adapter, configuredModel, traceDir string) htt
 			if finishReason == "" {
 				finishReason = "stop"
 			}
-			recordTraceLLM(recorder, model, started, firstByte, finishReason, result.Stream.Usage(), result.Attempts)
+			usage = result.Stream.Usage()
+			success = completed
+			recordTraceLLM(recorder, model, started, firstByte, finishReason, usage, result.Attempts)
 			return
 		}
 		var response map[string]json.RawMessage
@@ -140,6 +156,8 @@ func chatHandler(adapter provider.Adapter, configuredModel, traceDir string) htt
 			return
 		}
 		stopReason = "completed"
+		usage = result.Usage
+		success = true
 		elapsed := time.Since(started)
 		recordTraceLLM(recorder, model, started, elapsed, responseFinishReason(result.Body), result.Usage, result.Attempts)
 	}

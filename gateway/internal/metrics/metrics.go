@@ -17,6 +17,16 @@ type histogram struct {
 	sum     float64
 }
 
+type modelStats struct {
+	requests      uint64
+	errors        uint64
+	inputTokens   uint64
+	outputTokens  uint64
+	cachedTokens  uint64
+	costYuan      float64
+	requestTiming histogram
+}
+
 // Metrics 并发安全地累计 HTTP 请求、错误、延迟和首字节观测值。
 type Metrics struct {
 	mu               sync.RWMutex
@@ -26,6 +36,7 @@ type Metrics struct {
 	recentRequests   []time.Time
 	requestDuration  histogram
 	firstByteLatency histogram
+	models           map[string]*modelStats
 }
 
 // New 创建并初始化一组网关指标。
@@ -35,7 +46,45 @@ func New() *Metrics {
 		startedAt:        now,
 		requestDuration:  histogram{buckets: make([]uint64, len(histogramBounds))},
 		firstByteLatency: histogram{buckets: make([]uint64, len(histogramBounds))},
+		models:           make(map[string]*modelStats),
 	}
+}
+
+// ObserveModel 记录模型级 latency、usage、cost 与成功/失败状态。
+func (m *Metrics) ObserveModel(
+	model string,
+	duration time.Duration,
+	inputTokens, outputTokens, cachedTokens int,
+	costYuan float64,
+	success bool,
+) {
+	if model == "" {
+		model = "unknown"
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	stats, exists := m.models[model]
+	if !exists {
+		// 模型名可能来自请求体；限制标签基数，避免任意输入无限扩张指标内存。
+		if len(m.models) >= 64 {
+			model = "_other"
+			stats = m.models[model]
+		}
+		if stats == nil {
+			stats = &modelStats{requestTiming: histogram{buckets: make([]uint64, len(histogramBounds))}}
+			m.models[model] = stats
+		}
+	}
+	stats.requests++
+	if !success {
+		stats.errors++
+	}
+	stats.inputTokens += uint64(max(inputTokens, 0))
+	stats.outputTokens += uint64(max(outputTokens, 0))
+	stats.cachedTokens += uint64(max(cachedTokens, 0))
+	stats.costYuan += costYuan
+	stats.requestTiming.observe(duration.Seconds())
 }
 
 // Wrap 记录被包装 handler 的状态码、总耗时和首个响应字节时间。
@@ -77,6 +126,46 @@ func (m *Metrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, "# HELP gateway_errors_total HTTP requests with status 4xx or 5xx.\n# TYPE gateway_errors_total counter\ngateway_errors_total %d\n", m.errors)
 	writeHistogram(w, "gateway_request_duration_seconds", "HTTP request duration in seconds.", m.requestDuration)
 	writeHistogram(w, "gateway_first_byte_seconds", "Time to first response body byte in seconds.", m.firstByteLatency)
+	m.writeModelMetrics(w)
+}
+
+func (m *Metrics) writeModelMetrics(w http.ResponseWriter) {
+	_, _ = fmt.Fprintln(w, "# HELP gateway_model_requests_total Completed requests by model.")
+	_, _ = fmt.Fprintln(w, "# TYPE gateway_model_requests_total counter")
+	_, _ = fmt.Fprintln(w, "# HELP gateway_model_errors_total Failed requests by model.")
+	_, _ = fmt.Fprintln(w, "# TYPE gateway_model_errors_total counter")
+	_, _ = fmt.Fprintln(w, "# HELP gateway_model_input_tokens_total Input tokens by model.")
+	_, _ = fmt.Fprintln(w, "# TYPE gateway_model_input_tokens_total counter")
+	_, _ = fmt.Fprintln(w, "# HELP gateway_model_output_tokens_total Output tokens by model.")
+	_, _ = fmt.Fprintln(w, "# TYPE gateway_model_output_tokens_total counter")
+	_, _ = fmt.Fprintln(w, "# HELP gateway_model_cached_input_tokens_total Cached input tokens by model.")
+	_, _ = fmt.Fprintln(w, "# TYPE gateway_model_cached_input_tokens_total counter")
+	_, _ = fmt.Fprintln(w, "# HELP gateway_model_cost_yuan_total Estimated model cost in yuan.")
+	_, _ = fmt.Fprintln(w, "# TYPE gateway_model_cost_yuan_total counter")
+	for model, stats := range m.models {
+		label := strconv.Quote(model)
+		_, _ = fmt.Fprintf(w, "gateway_model_requests_total{model=%s} %d\n", label, stats.requests)
+		_, _ = fmt.Fprintf(w, "gateway_model_errors_total{model=%s} %d\n", label, stats.errors)
+		_, _ = fmt.Fprintf(w, "gateway_model_input_tokens_total{model=%s} %d\n", label, stats.inputTokens)
+		_, _ = fmt.Fprintf(w, "gateway_model_output_tokens_total{model=%s} %d\n", label, stats.outputTokens)
+		_, _ = fmt.Fprintf(w, "gateway_model_cached_input_tokens_total{model=%s} %d\n", label, stats.cachedTokens)
+		_, _ = fmt.Fprintf(w, "gateway_model_cost_yuan_total{model=%s} %s\n",
+			label, strconv.FormatFloat(stats.costYuan, 'f', 6, 64))
+		writeLabeledHistogram(w, "gateway_model_request_duration_seconds",
+			"Model request duration in seconds.", model, stats.requestTiming)
+	}
+}
+
+func writeLabeledHistogram(w http.ResponseWriter, name, help, model string, h histogram) {
+	_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s histogram\n", name, help, name)
+	label := strconv.Quote(model)
+	for i, bound := range histogramBounds {
+		_, _ = fmt.Fprintf(w, "%s_bucket{model=%s,le=%q} %d\n",
+			name, label, strconv.FormatFloat(bound, 'f', -1, 64), h.buckets[i])
+	}
+	_, _ = fmt.Fprintf(w, "%s_bucket{model=%s,le=\"+Inf\"} %d\n", name, label, h.count)
+	_, _ = fmt.Fprintf(w, "%s_sum{model=%s} %s\n%s_count{model=%s} %d\n",
+		name, label, strconv.FormatFloat(h.sum, 'f', 6, 64), name, label, h.count)
 }
 
 func (m *Metrics) observe(duration, firstByte time.Duration, hasFirstByte bool, status int) {

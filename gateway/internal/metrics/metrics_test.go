@@ -48,3 +48,26 @@ func TestMetricsWrapTracksStatusAndFirstByte(t *testing.T) {
 		t.Fatalf("metrics did not record the wrapped request:\n%s", response.Body)
 	}
 }
+
+func TestMetricsExposeModelUsageCostAndLatency(t *testing.T) {
+	metrics := New()
+	metrics.ObserveModel("economy", 250*time.Millisecond, 120, 30, 20, 0, true)
+	metrics.ObserveModel("economy", time.Second, 5, 0, 0, 0, false)
+
+	response := httptest.NewRecorder()
+	metrics.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := response.Body.String()
+	for _, metric := range []string{
+		`gateway_model_requests_total{model="economy"} 2`,
+		`gateway_model_errors_total{model="economy"} 1`,
+		`gateway_model_input_tokens_total{model="economy"} 125`,
+		`gateway_model_output_tokens_total{model="economy"} 30`,
+		`gateway_model_cached_input_tokens_total{model="economy"} 20`,
+		`gateway_model_cost_yuan_total{model="economy"} 0.000000`,
+		`gateway_model_request_duration_seconds_count{model="economy"} 2`,
+	} {
+		if !strings.Contains(body, metric) {
+			t.Errorf("metrics output missing %q:\n%s", metric, body)
+		}
+	}
+}

@@ -16,6 +16,7 @@
 | `POST /v1/tools/execute` | `{"name":"工具名","arguments":{}}` | `{"trace_id":"...","ok":true,"result":{...}}` | 第 5 周实现 |
 | `GET /v1/trace/{id}` | 路径携带 trace ID | `{"trace_id":"...","events":[...]}` | 后续实现 |
 | `GET /metrics` | 无 | `text/plain; version=0.0.4` 指标文本 | 第 4 周扩展；本周末实现网关基础指标 |
+| `POST /v1/cache/feedback` | `{"trace_id":"...","correct":true}` | `{"ok":true}` | 第 4 周用于缓存答案正误反馈 |
 
 `GET /healthz` 是运行探针，不属于上述四个业务接口。
 
@@ -41,6 +42,21 @@
 - Provider 通过内部 `Adapter` 注册；配置决定使用哪个实现，接口和 API 不依赖具体供应商。
 - Go 侧 JSONL trace 复用 Python `scripts/replay.py` 的事件字段；未计费前 `cost_yuan` 为 `0`。
 - 价格从根 `.env` 的 `ARK_PRICE_IN`、`ARK_PRICE_OUT`、`ARK_PRICE_CACHED` 读取，不在代码中硬编码业务价格。
+
+### 第 4 周指标与 usage 口径
+
+| 指标 | Prometheus 名称 | 口径 |
+| --- | --- | --- |
+| QPS | `gateway_requests_per_second` | 最近一分钟完成的 HTTP 请求数 / 实际窗口秒数 |
+| 分模型延迟 | `gateway_model_request_duration_seconds` | 从模型请求发出到响应处理完成的秒数直方图 |
+| 输入 token | `gateway_model_input_tokens_total` | Provider 返回的累计输入 token |
+| 输出 token | `gateway_model_output_tokens_total` | Provider 返回的累计输出 token |
+| 缓存输入 token | `gateway_model_cached_input_tokens_total` | 输入 token 的缓存命中子集，不重复计入普通输入价格 |
+| 错误率 | `gateway_errors_total / gateway_requests_total` | HTTP 4xx/5xx 请求占比；分模型错误数另见 `gateway_model_errors_total` |
+| 累计成本 | `gateway_model_cost_yuan_total` | 按 usage 与模型单价计算的估算人民币成本 |
+
+单次 usage 结构为 `{input_tokens, output_tokens, total_tokens, cached_tokens}`，其中
+`cached_tokens <= input_tokens`；成本精确到 0.0001 元后计入报告，trace 保留更高精度原值。
 
 ## 目录边界
 

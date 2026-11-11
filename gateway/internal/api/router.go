@@ -42,7 +42,7 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 	collector := metrics.New()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
-	mux.HandleFunc("/v1/chat/completions", chatHandler(guardedAdapter, cfg.Model, cfg.TraceDir))
+	mux.HandleFunc("/v1/chat/completions", chatHandler(guardedAdapter, cfg.Model, cfg.TraceDir, collector))
 	mux.Handle("/metrics", collector)
 	// 从外到内依次采集指标、注入 trace、限流、处理幂等请求并恢复 panic。
 	handler := NewIdempotencyCache().Wrap(recoveryMiddleware(mux))
