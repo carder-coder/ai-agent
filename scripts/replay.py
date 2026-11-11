@@ -38,6 +38,7 @@ def replay(path: Path) -> int:
     run_id = _required(start, "run_id", missing)
     stop_reason = _required(end, "stop_reason", missing)
     llm_events = [event for event in events if event.get("kind") == "llm"]
+    cache_events = [event for event in events if event.get("kind") == "cache"]
     tool_events: dict[int, list[dict[str, Any]]] = {}
     summary_events: dict[int, list[dict[str, Any]]] = {}
     summary_errors: dict[int, list[dict[str, Any]]] = {}
@@ -136,6 +137,18 @@ def replay(path: Path) -> int:
                 f"{tool.get('elapsed_ms', '字段缺失：elapsed_ms')}ms"
             )
 
+    for cached in cache_events:
+        usage = cached.get("usage")
+        if not isinstance(usage, dict):
+            usage = {}
+            missing.add("usage")
+        print(
+            f"语义缓存命中: model={cached.get('model', '字段缺失：model')} | "
+            f"相似度={cached.get('similarity', '字段缺失：similarity')} | "
+            f"token={usage.get('in', '?')}/{usage.get('out', '?')} | "
+            f"成本={cached.get('cost_yuan', '字段缺失：cost_yuan')} 元"
+        )
+
     usage_total = _required(end, "usage", missing)
     if not isinstance(usage_total, dict):
         usage_total = {}
@@ -145,7 +158,7 @@ def replay(path: Path) -> int:
     cost_events = [
         event
         for event in events
-        if event.get("kind") in {"llm", "summary", "summary_error"}
+        if event.get("kind") in {"llm", "cache", "summary", "summary_error"}
     ]
     llm_costs = [event.get("cost_yuan") for event in cost_events]
     if any(value is None for value in llm_costs):

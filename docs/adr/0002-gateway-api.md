@@ -63,6 +63,14 @@
 `GATEWAY_ROUTE_CONTEXT_THRESHOLD` 集中配置。聊天请求可附带 `task_type: "simple"` 或
 `"complex"`；长上下文阈值优先，路由输入与选择原因记录在 `llm.route` trace 字段。
 
+语义缓存只处理非流式、无工具且最后一条消息为纯文本 user 的请求；缓存 scope 包含所选模型、
+生成参数与此前完整对话，避免跨 system prompt 或参数复用。默认相似度阈值为 0.95，缓存仅驻留
+进程内 30 分钟并受条目/字节上限约束。命中 trace 可通过 `POST /v1/cache/feedback` 回报一次
+`correct`；`/metrics` 分别统计 eligible lookup、hit 和正确/错误反馈，错答率按
+`gateway_semantic_cache_incorrect_feedback_ratio`（`incorrect / (correct + incorrect)`）计算；
+命中率由 `gateway_semantic_cache_hit_ratio`（hit / eligible lookup）直接暴露。反馈样本数同时保留，
+无反馈时错误率 gauge 为 0，需结合反馈计数判断样本是否充足。
+
 ## 目录边界
 
 Go 服务和 Python Agent 同仓，但各用独立工具链：Go 代码、命令和测试位于 `gateway/`，不在仓库根目录创建

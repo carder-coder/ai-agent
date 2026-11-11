@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -85,5 +86,28 @@ func TestNewRecorderRejectsUnsafeRunIDAndDuplicateTrace(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(directory, runID+".jsonl")); err != nil {
 		t.Fatalf("trace file missing: %v", err)
+	}
+}
+
+func TestRecorderIncludesSemanticCacheCostInRunEnd(t *testing.T) {
+	recorder, err := NewRecorder(t.TempDir(), "", "POST /v1/chat/completions")
+	if err != nil {
+		t.Fatalf("NewRecorder() error = %v", err)
+	}
+	usage := Usage{In: 1000, Total: 1000, Cached: 1000}
+	if err := recorder.RecordCache("economy", "source-trace", 1, usage, 0.0002, Route{Reason: "default"}); err != nil {
+		t.Fatalf("RecordCache() error = %v", err)
+	}
+	if err := recorder.End("cache_hit", 1); err != nil {
+		t.Fatalf("End() error = %v", err)
+	}
+
+	content, err := os.ReadFile(recorder.Path())
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	if !strings.Contains(string(content), `"kind":"cache"`) ||
+		!strings.Contains(string(content), `"total_cost_yuan":0.0002`) {
+		t.Fatalf("trace missing cache event or accumulated cost: %s", content)
 	}
 }

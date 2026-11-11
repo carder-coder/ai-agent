@@ -20,6 +20,7 @@ func TestLoadUsesGatewayDefaults(t *testing.T) {
 	t.Setenv("GATEWAY_ROUTE_COMPLEX_MODEL", "")
 	t.Setenv("ARK_MODEL_MINI", "")
 	t.Setenv("ARK_MODEL", "")
+	t.Setenv("GATEWAY_SEMANTIC_CACHE_THRESHOLD", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -40,6 +41,9 @@ func TestLoadUsesGatewayDefaults(t *testing.T) {
 	if cfg.RouteContextThreshold != 8192 {
 		t.Fatalf("route context threshold = %d, want 8192", cfg.RouteContextThreshold)
 	}
+	if cfg.SemanticCacheThreshold != 0.95 {
+		t.Fatalf("semantic cache threshold = %f, want 0.95", cfg.SemanticCacheThreshold)
+	}
 }
 
 func TestLoadRejectsInvalidPort(t *testing.T) {
@@ -56,6 +60,13 @@ func TestLoadRejectsTooManyRetries(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidSemanticCacheThreshold(t *testing.T) {
+	t.Setenv("GATEWAY_SEMANTIC_CACHE_THRESHOLD", "1.1")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() accepted a semantic cache threshold above 1")
+	}
+}
+
 func TestLoadUsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("GATEWAY_PORT", "9090")
 	t.Setenv("GATEWAY_MAX_CONCURRENCY", "50")
@@ -64,6 +75,7 @@ func TestLoadUsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("GATEWAY_ROUTE_SIMPLE_MODEL", "economy")
 	t.Setenv("GATEWAY_ROUTE_COMPLEX_MODEL", "premium")
 	t.Setenv("GATEWAY_ROUTE_CONTEXT_THRESHOLD", "4096")
+	t.Setenv("GATEWAY_SEMANTIC_CACHE_THRESHOLD", "0.97")
 
 	cfg, err := Load()
 	if err != nil {
@@ -76,5 +88,8 @@ func TestLoadUsesEnvironmentOverrides(t *testing.T) {
 	if cfg.RouteSimpleModel != "economy" || cfg.RouteComplexModel != "premium" ||
 		cfg.RouteContextThreshold != 4096 {
 		t.Fatalf("route overrides not applied: %+v", cfg)
+	}
+	if cfg.SemanticCacheThreshold != 0.97 {
+		t.Fatalf("semantic cache threshold = %f, want 0.97", cfg.SemanticCacheThreshold)
 	}
 }

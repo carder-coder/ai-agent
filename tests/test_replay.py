@@ -89,3 +89,37 @@ def test_replay_includes_summary_cost_in_total(tmp_path: Path, capsys) -> None:
     output = capsys.readouterr().out
     assert "摘要: v1 覆盖 3 条" in output
     assert "与 run_end 差值: 0.0 元" in output
+
+
+def test_replay_includes_semantic_cache_cost_in_total(tmp_path: Path, capsys) -> None:
+    """语义缓存事件应单独呈现，并参与 run_end 成本复核。"""
+    trace = tmp_path / "cache.jsonl"
+    events = [
+        {"kind": "run_start", "run_id": "cache", "ts": "2026-11-11T10:00:00"},
+        {
+            "kind": "cache",
+            "step": 1,
+            "model": "economy",
+            "similarity": 1.0,
+            "usage": {"in": 1000, "out": 0, "total": 1000, "cached": 1000},
+            "cost_yuan": 0.0002,
+            "ts": "2026-11-11T10:00:01",
+        },
+        {
+            "kind": "run_end",
+            "steps": 1,
+            "stop_reason": "cache_hit",
+            "usage": {"in": 1000, "out": 0, "total": 1000, "cached": 1000},
+            "total_cost_yuan": 0.0002,
+            "ts": "2026-11-11T10:00:02",
+        },
+    ]
+    trace.write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+    assert replay(trace) == 0
+    output = capsys.readouterr().out
+    assert "语义缓存命中: model=economy" in output
+    assert "与 run_end 差值: 0.0 元" in output

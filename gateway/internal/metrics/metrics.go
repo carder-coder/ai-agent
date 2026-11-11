@@ -38,6 +38,10 @@ type Metrics struct {
 	requestDuration  histogram
 	firstByteLatency histogram
 	models           map[string]*modelStats
+	cacheLookups     uint64
+	cacheHits        uint64
+	cacheCorrect     uint64
+	cacheIncorrect   uint64
 }
 
 // New 创建并初始化一组网关指标。
@@ -90,6 +94,27 @@ func (m *Metrics) ObserveModel(
 	stats.requestTiming.observe(duration.Seconds())
 }
 
+// ObserveCacheLookup 记录可缓存聊天请求及其中的语义命中数。
+func (m *Metrics) ObserveCacheLookup(hit bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cacheLookups++
+	if hit {
+		m.cacheHits++
+	}
+}
+
+// ObserveCacheFeedback 累计用户对语义缓存答案的正误反馈。
+func (m *Metrics) ObserveCacheFeedback(correct bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if correct {
+		m.cacheCorrect++
+	} else {
+		m.cacheIncorrect++
+	}
+}
+
 // Wrap 记录被包装 handler 的状态码、总耗时和首个响应字节时间。
 func (m *Metrics) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -129,6 +154,32 @@ func (m *Metrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, "# HELP gateway_errors_total HTTP requests with status 4xx or 5xx.\n# TYPE gateway_errors_total counter\ngateway_errors_total %d\n", m.errors)
 	writeHistogram(w, "gateway_request_duration_seconds", "HTTP request duration in seconds.", m.requestDuration)
 	writeHistogram(w, "gateway_first_byte_seconds", "Time to first response body byte in seconds.", m.firstByteLatency)
+	_, _ = fmt.Fprintln(w, "# HELP gateway_semantic_cache_lookups_total Eligible semantic cache lookups.")
+	_, _ = fmt.Fprintln(w, "# TYPE gateway_semantic_cache_lookups_total counter")
+	_, _ = fmt.Fprintf(w, "gateway_semantic_cache_lookups_total %d\n", m.cacheLookups)
+	_, _ = fmt.Fprintln(w, "# HELP gateway_semantic_cache_hits_total Semantic cache hits.")
+	_, _ = fmt.Fprintln(w, "# TYPE gateway_semantic_cache_hits_total counter")
+	_, _ = fmt.Fprintf(w, "gateway_semantic_cache_hits_total %d\n", m.cacheHits)
+	_, _ = fmt.Fprintln(w, "# HELP gateway_semantic_cache_feedback_total User feedback on semantic cache answers.")
+	_, _ = fmt.Fprintln(w, "# TYPE gateway_semantic_cache_feedback_total counter")
+	_, _ = fmt.Fprintf(w, "gateway_semantic_cache_feedback_total{result=\"correct\"} %d\n", m.cacheCorrect)
+	_, _ = fmt.Fprintf(w, "gateway_semantic_cache_feedback_total{result=\"incorrect\"} %d\n", m.cacheIncorrect)
+	hitRatio := float64(0)
+	if m.cacheLookups > 0 {
+		hitRatio = float64(m.cacheHits) / float64(m.cacheLookups)
+	}
+	feedbackCount := m.cacheCorrect + m.cacheIncorrect
+	incorrectRatio := float64(0)
+	if feedbackCount > 0 {
+		incorrectRatio = float64(m.cacheIncorrect) / float64(feedbackCount)
+	}
+	_, _ = fmt.Fprintln(w, "# HELP gateway_semantic_cache_hit_ratio Cache hits divided by eligible lookups.")
+	_, _ = fmt.Fprintln(w, "# TYPE gateway_semantic_cache_hit_ratio gauge")
+	_, _ = fmt.Fprintf(w, "gateway_semantic_cache_hit_ratio %s\n", strconv.FormatFloat(hitRatio, 'f', 6, 64))
+	_, _ = fmt.Fprintln(w, "# HELP gateway_semantic_cache_incorrect_feedback_ratio Incorrect feedback divided by all feedback.")
+	_, _ = fmt.Fprintln(w, "# TYPE gateway_semantic_cache_incorrect_feedback_ratio gauge")
+	_, _ = fmt.Fprintf(w, "gateway_semantic_cache_incorrect_feedback_ratio %s\n",
+		strconv.FormatFloat(incorrectRatio, 'f', 6, 64))
 	m.writeModelMetrics(w)
 }
 

@@ -4,6 +4,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	semanticcache "github.com/carder-coder/ai-agent/gateway/internal/cache"
 	"github.com/carder-coder/ai-agent/gateway/internal/cost"
 	"github.com/carder-coder/ai-agent/gateway/internal/metrics"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider"
@@ -39,6 +42,7 @@ func chatHandler(
 	collector *metrics.Metrics,
 	prices cost.Prices,
 	rules routing.Rules,
+	semanticCache *semanticcache.Store,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -73,6 +77,7 @@ func chatHandler(
 			writeError(w, http.StatusBadRequest, "body: must be valid JSON", "invalid_request_error", "invalid_request")
 			return
 		}
+		cacheScope, cacheQuery, cacheEligible := semanticCacheKey(fields, model, stream)
 
 		started := time.Now()
 		var usage provider.Usage
@@ -101,6 +106,70 @@ func chatHandler(
 					log.Printf("写入请求 trace 结束事件失败：%v", err)
 				}
 			}()
+		}
+
+		if cacheEligible {
+			entry, similarity, hit := semanticCache.Lookup(cacheScope, cacheQuery)
+			collector.ObserveCacheLookup(hit)
+			if hit {
+				traceID := trace.IDFromContext(r.Context())
+				if err := semanticCache.TrackHit(traceID, entry.ID); err != nil {
+					log.Printf("关联语义缓存反馈失败：%v", err)
+					writeError(w, http.StatusServiceUnavailable, "semantic cache feedback capacity reached", "server_error", "cache_feedback_unavailable")
+					return
+				}
+				usage = provider.Usage{
+					InputTokens:  entry.Usage.InputTokens,
+					TotalTokens:  entry.Usage.InputTokens,
+					CachedTokens: entry.Usage.InputTokens,
+				}
+				requestCost, err = cost.Calculate(usage, prices)
+				if err != nil {
+					stopReason = "cache_usage_error"
+					writeError(w, http.StatusBadGateway, "semantic cache contains invalid token usage", "upstream_error", "invalid_usage")
+					return
+				}
+				cachedBody, err := semanticCacheResponse(entry.Body, model, traceID, usage)
+				if err != nil {
+					stopReason = "cache_response_error"
+					log.Printf("准备语义缓存响应失败：%v", err)
+					writeError(w, http.StatusBadGateway, "semantic cache response is invalid", "upstream_error", "invalid_cached_response")
+					return
+				}
+				if recorder != nil {
+					if err := recorder.RecordCache(
+						model,
+						entry.ID,
+						similarity,
+						trace.Usage{
+							In:     usage.InputTokens,
+							Out:    usage.OutputTokens,
+							Total:  usage.TotalTokens,
+							Cached: usage.CachedTokens,
+						},
+						requestCost,
+						trace.Route{
+							TaskType:      decision.TaskType,
+							ContextLength: decision.ContextLength,
+							Reason:        decision.Reason,
+						},
+					); err != nil {
+						log.Printf("写入语义缓存 trace 失败：%v", err)
+					}
+				}
+				w.Header().Set("X-Semantic-Cache", "HIT")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				if _, err := w.Write(append(cachedBody, '\n')); err != nil {
+					stopReason = "client_disconnected"
+					log.Printf("写入语义缓存响应失败：%v", err)
+					return
+				}
+				stopReason = "cache_hit"
+				success = true
+				return
+			}
+			w.Header().Set("X-Semantic-Cache", "MISS")
 		}
 
 		result, err := adapter.Chat(r.Context(), upstreamBody, stream)
@@ -175,6 +244,15 @@ func chatHandler(
 			writeError(w, http.StatusBadGateway, "provider returned invalid token usage", "upstream_error", "invalid_usage")
 			return
 		}
+		if cacheEligible && !semanticCache.Put(semanticcache.Entry{
+			ID:    trace.IDFromContext(r.Context()),
+			Scope: cacheScope,
+			Query: cacheQuery,
+			Body:  result.Body,
+			Usage: usage,
+		}) {
+			log.Printf("语义缓存未保存请求：容量已满或响应不适合缓存")
+		}
 		recordTraceLLM(
 			recorder,
 			model,
@@ -197,6 +275,93 @@ func chatHandler(
 		stopReason = "completed"
 		success = true
 	}
+}
+
+func semanticCacheKey(fields map[string]json.RawMessage, model string, stream bool) (string, string, bool) {
+	if stream {
+		return "", "", false
+	}
+	for _, key := range []string{"tools", "tool_choice", "functions", "function_call"} {
+		if raw, exists := fields[key]; exists && string(bytes.TrimSpace(raw)) != "null" {
+			return "", "", false
+		}
+	}
+
+	var messages []json.RawMessage
+	if err := json.Unmarshal(fields["messages"], &messages); err != nil || len(messages) == 0 {
+		return "", "", false
+	}
+	for _, raw := range messages {
+		var message chatMessage
+		if err := json.Unmarshal(raw, &message); err != nil ||
+			(len(message.ToolCall) > 0 && string(message.ToolCall) != "null") {
+			return "", "", false
+		}
+	}
+	var lastMessage chatMessage
+	if err := json.Unmarshal(messages[len(messages)-1], &lastMessage); err != nil ||
+		lastMessage.Role != "user" {
+		return "", "", false
+	}
+	var query string
+	if err := json.Unmarshal(lastMessage.Content, &query); err != nil || strings.TrimSpace(query) == "" {
+		return "", "", false
+	}
+
+	parameters := make(map[string]json.RawMessage, len(fields))
+	for key, value := range fields {
+		if key != "model" && key != "messages" && key != "stream" {
+			parameters[key] = value
+		}
+	}
+	scopeData, err := json.Marshal(struct {
+		Model      string                     `json:"model"`
+		Parameters map[string]json.RawMessage `json:"parameters"`
+		History    []json.RawMessage          `json:"history"`
+	}{
+		Model:      model,
+		Parameters: parameters,
+		History:    messages[:len(messages)-1],
+	})
+	if err != nil {
+		return "", "", false
+	}
+	scopeHash := sha256.Sum256(scopeData)
+	return hex.EncodeToString(scopeHash[:]), strings.TrimSpace(query), true
+}
+
+func semanticCacheResponse(body []byte, model, traceID string, usage provider.Usage) ([]byte, error) {
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(body, &response); err != nil || response == nil {
+		return nil, errors.New("cached response must be a JSON object")
+	}
+	id, err := json.Marshal("chatcmpl-cache-" + traceID)
+	if err != nil {
+		return nil, fmt.Errorf("encode cached response ID: %w", err)
+	}
+	response["id"] = id
+	encodedModel, err := json.Marshal(model)
+	if err != nil {
+		return nil, fmt.Errorf("encode cached response model: %w", err)
+	}
+	response["model"] = encodedModel
+	encodedUsage, err := json.Marshal(map[string]any{
+		"prompt_tokens":     usage.InputTokens,
+		"completion_tokens": usage.OutputTokens,
+		"total_tokens":      usage.TotalTokens,
+		"prompt_tokens_details": map[string]int{
+			"cached_tokens": usage.CachedTokens,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode cached response usage: %w", err)
+	}
+	response["usage"] = encodedUsage
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		return nil, fmt.Errorf("encode cached response: %w", err)
+	}
+	return encoded, nil
 }
 
 // recordTraceLLM 将 Provider 用量和延迟写入当前请求的 trace。

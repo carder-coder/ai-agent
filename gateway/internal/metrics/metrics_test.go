@@ -71,3 +71,27 @@ func TestMetricsExposeModelUsageCostAndLatency(t *testing.T) {
 		}
 	}
 }
+
+func TestMetricsExposeSemanticCacheHitAndFeedbackCounts(t *testing.T) {
+	metrics := New()
+	metrics.ObserveCacheLookup(false)
+	metrics.ObserveCacheLookup(true)
+	metrics.ObserveCacheFeedback(true)
+	metrics.ObserveCacheFeedback(false)
+
+	response := httptest.NewRecorder()
+	metrics.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := response.Body.String()
+	for _, metric := range []string{
+		"gateway_semantic_cache_lookups_total 2",
+		"gateway_semantic_cache_hits_total 1",
+		`gateway_semantic_cache_feedback_total{result="correct"} 1`,
+		`gateway_semantic_cache_feedback_total{result="incorrect"} 1`,
+		"gateway_semantic_cache_hit_ratio 0.500000",
+		"gateway_semantic_cache_incorrect_feedback_ratio 0.500000",
+	} {
+		if !strings.Contains(body, metric) {
+			t.Errorf("metrics output missing %q:\n%s", metric, body)
+		}
+	}
+}

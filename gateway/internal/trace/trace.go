@@ -121,6 +121,32 @@ func (r *Recorder) RecordLLM(
 	})
 }
 
+// RecordCache 累计缓存命中的 usage 与成本，但不伪装成一次模型调用。
+func (r *Recorder) RecordCache(
+	model, cacheID string,
+	similarity float64,
+	usage Usage,
+	costYuan float64,
+	route Route,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.usage.In += usage.In
+	r.usage.Out += usage.Out
+	r.usage.Total += usage.Total
+	r.usage.Cached += usage.Cached
+	r.costUnits += int64(math.Round(costYuan * 10_000))
+	return r.writeEventLocked("cache", map[string]any{
+		"step":       1,
+		"model":      model,
+		"cache_id":   cacheID,
+		"similarity": similarity,
+		"usage":      usage,
+		"cost_yuan":  costYuan,
+		"route":      route,
+	})
+}
+
 // End 写入包含累计用量的 run_end 事件并关闭 trace 文件。
 func (r *Recorder) End(stopReason string, steps int) error {
 	r.mu.Lock()

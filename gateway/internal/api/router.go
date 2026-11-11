@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
+	semanticcache "github.com/carder-coder/ai-agent/gateway/internal/cache"
 	"github.com/carder-coder/ai-agent/gateway/internal/config"
 	"github.com/carder-coder/ai-agent/gateway/internal/cost"
 	"github.com/carder-coder/ai-agent/gateway/internal/metrics"
@@ -42,6 +44,7 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 	}
 
 	collector := metrics.New()
+	semanticCache := semanticcache.New(cfg.SemanticCacheThreshold, 30*time.Minute)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/v1/chat/completions", chatHandler(
@@ -55,7 +58,9 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 			ComplexModel:     cfg.RouteComplexModel,
 			ContextThreshold: cfg.RouteContextThreshold,
 		},
+		semanticCache,
 	))
+	mux.HandleFunc("/v1/cache/feedback", cacheFeedbackHandler(semanticCache, collector))
 	mux.Handle("/metrics", collector)
 	// 从外到内依次采集指标、注入 trace、限流、处理幂等请求并恢复 panic。
 	handler := NewIdempotencyCache().Wrap(recoveryMiddleware(mux))
