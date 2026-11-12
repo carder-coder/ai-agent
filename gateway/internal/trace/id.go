@@ -18,6 +18,19 @@ func NewID() (string, error) {
 	return hex.EncodeToString(value[:]), nil
 }
 
+// ValidID 检查 trace ID 是否为安全的 32 位小写十六进制文件名。
+func ValidID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	for _, value := range id {
+		if !((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 // WithID 将请求 trace ID 写入 context，供处理链后续读取。
 func WithID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, contextKey{}, id)

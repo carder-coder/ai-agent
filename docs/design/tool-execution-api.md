@@ -26,6 +26,9 @@
 - 成功响应包含 `trace_id`、`tool`、`result` 和 `duration_ms`。结果输出限制为 16 KiB，
   单次执行超时 3 秒。
 - 每次执行都会写 trace；响应头 `X-Trace-ID` 与响应中的 `trace_id` 相同。
+- trace 中敏感文本/凭证参数仅保留 UTF-8 字节数和 SHA-256 摘要；完整结果正文不写入审计事件。
+- 如果工具属于已有对话，可在 `X-Conversation-ID` 中传入该对话的 trace ID；查询父 ID 时会把关联的
+  工具事件合并到对话 JSONL 的 `run_end` 之前。省略该头时，工具调用保留为独立 trace。
 
 ## 写操作审批
 
@@ -44,6 +47,7 @@
 
 - 只接受 32 位小写十六进制 trace ID，禁止路径片段和其他文件名。
 - 成功返回 JSONL 原文（`application/x-ndjson`）；trace 不存在返回 `404 trace_not_found`。
+- 单次查询最多返回 8 MiB；超过上限返回 `413 trace_too_large`。
 - trace 只记录工具参数、调用方标识、结果摘要、耗时和状态，不记录认证凭证。
 - trace 文件仅服务进程用户可读写；调用方身份由可信入口写入 `X-Caller-ID`。
 - 网关本身不认证普通调用方；部署时必须由可信认证代理删除外部传入的 `X-Caller-ID` 并写入

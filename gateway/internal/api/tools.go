@@ -30,9 +30,48 @@ type toolResponse struct {
 }
 
 // toolExecuteHandler 只执行固定注册的工具，并在任何操作前完成完整参数校验。
-func toolExecuteHandler(executor *tools.Executor, approvals *approvalStore, allowWrites bool) http.HandlerFunc {
+func toolExecuteHandler(
+	traceDir string,
+	executor *tools.Executor,
+	approvals *approvalStore,
+	allowWrites bool,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		traceID := trace.IDFromContext(r.Context())
+		recorder, err := trace.NewRecorder(traceDir, traceID, "POST /v1/tools/execute")
+		if err != nil {
+			log.Printf("创建工具执行 trace 失败 trace_id=%s: %v", traceID, err)
+			writeError(w, http.StatusServiceUnavailable, "tool audit trace is unavailable", "server_error", "trace_unavailable")
+			return
+		}
+		auditStarted := time.Now()
+		audit := trace.ToolEvent{
+			Caller:        callerIDFromRequest(r),
+			TraceID:       traceID,
+			Parameters:    map[string]any{},
+			ResultSummary: map[string]any{},
+			Status:        "invalid_request",
+		}
+		if audit.Caller == "" {
+			audit.Caller = "anonymous"
+		}
+		defer func() {
+			audit.DurationMS = time.Since(auditStarted).Milliseconds()
+			if err := recorder.RecordTool(audit); err != nil {
+				log.Printf("写入工具审计事件失败 trace_id=%s: %v", traceID, err)
+			}
+			if err := recorder.End(audit.Status, 1); err != nil {
+				log.Printf("结束工具执行 trace 失败 trace_id=%s: %v", traceID, err)
+			}
+			if audit.ConversationID != "" {
+				if err := trace.LinkConversation(traceDir, audit.ConversationID, traceID); err != nil {
+					log.Printf("关联会话工具 trace 失败 conversation_id=%s child_trace_id=%s: %v",
+						audit.ConversationID, traceID, err)
+				}
+			}
+		}()
 		if r.Method != http.MethodPost {
+			audit.Status = "method_not_allowed"
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")
 			return
 		}
@@ -40,13 +79,46 @@ func toolExecuteHandler(executor *tools.Executor, approvals *approvalStore, allo
 		if !decodeStrictRequest(w, r, &request) {
 			return
 		}
+		conversationID := r.Header.Get("X-Conversation-ID")
+		if conversationID != "" {
+			if !trace.ValidID(conversationID) {
+				audit.Status = "invalid_conversation_id"
+				audit.ResultSummary = map[string]any{"error_code": audit.Status}
+				writeError(w, http.StatusBadRequest, "X-Conversation-ID must be a trace ID", "invalid_request_error", audit.Status)
+				return
+			}
+			exists, err := trace.HasTrace(traceDir, conversationID)
+			if err != nil {
+				log.Printf("检查会话 trace 失败 conversation_id=%s: %v", conversationID, err)
+				audit.Status = "trace_unavailable"
+				audit.ResultSummary = map[string]any{"error_code": audit.Status}
+				writeError(w, http.StatusInternalServerError, "conversation trace is unavailable", "server_error", audit.Status)
+				return
+			}
+			if !exists {
+				audit.Status = "conversation_not_found"
+				audit.ResultSummary = map[string]any{"error_code": audit.Status}
+				writeError(w, http.StatusNotFound, "conversation trace is not found", "invalid_request_error", audit.Status)
+				return
+			}
+			audit.ConversationID = conversationID
+		}
+		audit.Name = request.Tool
+		audit.Parameters = map[string]any{
+			"arguments":   auditParameters(request.Arguments),
+			"approval_id": request.ApprovalID,
+		}
 		definition, exists := tools.Lookup(request.Tool)
 		if !exists {
+			audit.Status = "tool_not_found"
+			audit.ResultSummary = map[string]any{"error_code": audit.Status}
 			writeError(w, http.StatusNotFound, "tool is not registered", "invalid_request_error", "tool_not_found")
 			return
 		}
 		issues, arguments := tools.ValidateArguments(request.Arguments, definition)
 		if len(issues) > 0 {
+			audit.Status = "invalid_tool_arguments"
+			audit.ResultSummary = map[string]any{"field_errors": issues}
 			details := make([]fieldError, len(issues))
 			for index, issue := range issues {
 				details[index] = fieldError{Field: issue.Field, Message: issue.Message}
@@ -54,17 +126,30 @@ func toolExecuteHandler(executor *tools.Executor, approvals *approvalStore, allo
 			writeDetailedError(w, http.StatusBadRequest, "tool arguments failed schema validation", "invalid_request_error", "invalid_tool_arguments", details)
 			return
 		}
+		audit.Status = "started"
+		if err := recorder.RecordToolStart(audit); err != nil {
+			audit.Status = "trace_unavailable"
+			log.Printf("持久化工具执行开始事件失败 trace_id=%s: %v", traceID, err)
+			writeError(w, http.StatusServiceUnavailable, "tool audit trace is unavailable", "server_error", "trace_unavailable")
+			return
+		}
 		if definition.Write {
 			if !allowWrites {
+				audit.Status = "tool_writes_disabled"
+				audit.ResultSummary = map[string]any{"error_code": audit.Status}
 				writeError(w, http.StatusForbidden, "write tools are disabled", "permission_error", "tool_writes_disabled")
 				return
 			}
 			callerID := callerIDFromRequest(r)
 			if callerID == "" {
+				audit.Status = "caller_id_required"
+				audit.ResultSummary = map[string]any{"error_code": audit.Status}
 				writeError(w, http.StatusBadRequest, "X-Caller-ID is required for write tools", "invalid_request_error", "caller_id_required")
 				return
 			}
 			if err := approvals.Consume(request.ApprovalID, callerID, request.Tool, arguments); err != nil {
+				audit.Status = approvalErrorCode(err)
+				audit.ResultSummary = map[string]any{"error_code": audit.Status}
 				writeApprovalError(w, err)
 				return
 			}
@@ -73,18 +158,26 @@ func toolExecuteHandler(executor *tools.Executor, approvals *approvalStore, allo
 		started := time.Now()
 		result, err := executor.Execute(r.Context(), request.Tool, arguments)
 		if err != nil {
+			audit.Status = "tool_execution_failed"
 			log.Printf("工具执行失败 tool=%s trace_id=%s: %v", request.Tool, trace.IDFromContext(r.Context()), err)
 			if errors.Is(err, tools.ErrTimeout) {
+				audit.Status = "tool_timeout"
+				audit.ResultSummary = map[string]any{"error_code": audit.Status}
 				writeError(w, http.StatusGatewayTimeout, "tool execution timed out", "timeout", "tool_timeout")
 				return
 			}
 			if errors.Is(err, tools.ErrWritesDisabled) {
+				audit.Status = "tool_writes_disabled"
+				audit.ResultSummary = map[string]any{"error_code": audit.Status}
 				writeError(w, http.StatusForbidden, "write tools are disabled", "permission_error", "tool_writes_disabled")
 				return
 			}
+			audit.ResultSummary = map[string]any{"error_code": audit.Status}
 			writeError(w, http.StatusBadGateway, "tool execution failed", "server_error", "tool_execution_failed")
 			return
 		}
+		audit.Status = "completed"
+		audit.ResultSummary = auditResultSummary(result)
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(toolResponse{
 			TraceID:    trace.IDFromContext(r.Context()),
@@ -178,7 +271,7 @@ func toolApprovalConfirmHandler(approvals *approvalStore, token string, allowWri
 			return
 		}
 		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/tools/approvals/"), "/confirm")
-		if id == r.URL.Path || !validApprovalID(id) {
+		if id == r.URL.Path || !trace.ValidID(id) {
 			writeError(w, http.StatusNotFound, "approval is not found", "invalid_request_error", "approval_not_found")
 			return
 		}

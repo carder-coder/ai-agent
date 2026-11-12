@@ -29,6 +29,18 @@ type Route struct {
 	Reason        string `json:"reason"`
 }
 
+// ToolEvent 保存工具调用的审计摘要，不应包含凭证或未脱敏的敏感文本。
+type ToolEvent struct {
+	Caller         string `json:"caller"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	TraceID        string `json:"trace_id"`
+	Name           string `json:"tool"`
+	Parameters     any    `json:"parameters"`
+	ResultSummary  any    `json:"result_summary"`
+	DurationMS     int64  `json:"duration_ms"`
+	Status         string `json:"status"`
+}
+
 // Recorder 将单次网关请求的模型调用和汇总写入 JSONL 文件。
 type Recorder struct {
 	mu        sync.Mutex
@@ -47,7 +59,7 @@ func NewRecorder(directory, runID, task string) (*Recorder, error) {
 			return nil, fmt.Errorf("generate trace run ID: %w", err)
 		}
 	}
-	if !validRunID(runID) {
+	if !ValidID(runID) {
 		return nil, errors.New("trace run ID must be 32 lowercase hexadecimal characters")
 	}
 	if strings.TrimSpace(directory) == "" {
@@ -157,6 +169,33 @@ func (r *Recorder) RecordBudgetRejection(estimate, dailyLimit, requestLimit floa
 	})
 }
 
+// RecordTool 写入包含调用方、脱敏参数、结果摘要、耗时与状态的工具审计事件。
+func (r *Recorder) RecordTool(event ToolEvent) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.recordToolLocked("tool", event)
+}
+
+// RecordToolStart 在执行副作用前持久化调用方与脱敏参数，审计存储不可用时可阻止执行。
+func (r *Recorder) RecordToolStart(event ToolEvent) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.recordToolLocked("tool_start", event)
+}
+
+func (r *Recorder) recordToolLocked(kind string, event ToolEvent) error {
+	return r.writeEventLocked(kind, map[string]any{
+		"caller":          event.Caller,
+		"conversation_id": event.ConversationID,
+		"trace_id":        event.TraceID,
+		"tool":            event.Name,
+		"parameters":      event.Parameters,
+		"result_summary":  event.ResultSummary,
+		"duration_ms":     event.DurationMS,
+		"status":          event.Status,
+	})
+}
+
 // End 写入包含累计用量的 run_end 事件并关闭 trace 文件。
 func (r *Recorder) End(stopReason string, steps int) error {
 	r.mu.Lock()
@@ -219,16 +258,4 @@ func wrapTraceCleanupError(operation string, err error) error {
 		return nil
 	}
 	return fmt.Errorf("%s: %w", operation, err)
-}
-
-func validRunID(runID string) bool {
-	if len(runID) != 32 {
-		return false
-	}
-	for _, value := range runID {
-		if !((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f')) {
-			return false
-		}
-	}
-	return true
 }

@@ -127,18 +127,6 @@ func argumentsDigest(arguments map[string]any) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
-func validApprovalID(id string) bool {
-	if len(id) != 32 {
-		return false
-	}
-	for _, value := range id {
-		if !((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f')) {
-			return false
-		}
-	}
-	return true
-}
-
 func writeApprovalError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errApprovalNotFound):
@@ -151,5 +139,20 @@ func writeApprovalError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "approval does not match caller, tool, or arguments", "invalid_request_error", "approval_mismatch")
 	default:
 		writeError(w, http.StatusServiceUnavailable, "approval service is unavailable", "server_error", "approval_unavailable")
+	}
+}
+
+func approvalErrorCode(err error) string {
+	switch {
+	case errors.Is(err, errApprovalNotFound):
+		return "approval_not_found"
+	case errors.Is(err, errApprovalExpired):
+		return "approval_expired"
+	case errors.Is(err, errApprovalNotConfirmed):
+		return "approval_not_confirmed"
+	case errors.Is(err, errApprovalMismatch):
+		return "approval_mismatch"
+	default:
+		return "approval_unavailable"
 	}
 }

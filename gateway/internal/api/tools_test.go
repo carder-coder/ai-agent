@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/carder-coder/ai-agent/gateway/internal/config"
+	"github.com/carder-coder/ai-agent/gateway/internal/trace"
 )
 
 func TestToolExecuteRejectsInvalidArgumentsWithFieldDetails(t *testing.T) {
@@ -120,7 +121,7 @@ func TestWriteNoteRequiresConfirmedBoundApprovalAndCannotReplay(t *testing.T) {
 	if err := json.Unmarshal(prepared.Body.Bytes(), &approval); err != nil {
 		t.Fatalf("decode prepared approval: %v", err)
 	}
-	if !validApprovalID(approval.ApprovalID) || !approval.ExpiresAt.After(time.Now()) {
+	if !trace.ValidID(approval.ApprovalID) || !approval.ExpiresAt.After(time.Now()) {
 		t.Fatalf("invalid prepared approval: %+v", approval)
 	}
 
@@ -217,5 +218,119 @@ func TestWriteToolsAreDisabledByDefaultAndRejectUnsafeFilename(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(workspace), "escape.txt")); !os.IsNotExist(err) {
 		t.Fatalf("unsafe path created a file: %v", err)
+	}
+}
+
+func TestToolExecutionAuditIsRedactedAndRetrievableByTraceID(t *testing.T) {
+	traceDir := t.TempDir()
+	handler := newTestRouter(t, config.Config{Provider: "mock", TraceDir: traceDir})
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/tools/execute",
+		strings.NewReader(`{"tool":"inspect_text","arguments":{"text":"private prompt"}}`),
+	)
+	request.Header.Set("X-Caller-ID", "audit-worker")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("execute status = %d, body=%s", response.Code, response.Body)
+	}
+
+	traceID := response.Header().Get("X-Trace-ID")
+	tracePath := filepath.Join(traceDir, traceID+".jsonl")
+	fileContent, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace file: %v", err)
+	}
+	if strings.Contains(string(fileContent), "private prompt") ||
+		!strings.Contains(string(fileContent), `"caller":"audit-worker"`) ||
+		!strings.Contains(string(fileContent), `"kind":"tool"`) ||
+		!strings.Contains(string(fileContent), `"status":"completed"`) ||
+		!strings.Contains(string(fileContent), `"sha256"`) {
+		t.Fatalf("trace is missing audit fields or includes raw text: %s", fileContent)
+	}
+	if count := strings.Count(string(fileContent), `"kind":`); count != 4 {
+		t.Fatalf("trace event count = %d, want run_start/tool_start/tool/run_end", count)
+	}
+
+	traceResponse := httptest.NewRecorder()
+	handler.ServeHTTP(traceResponse, httptest.NewRequest(http.MethodGet, "/v1/trace/"+traceID, nil))
+	if traceResponse.Code != http.StatusOK ||
+		traceResponse.Header().Get("Content-Type") != "application/x-ndjson" ||
+		traceResponse.Body.String() != string(fileContent) {
+		t.Fatalf("trace endpoint response status=%d type=%q body=%s",
+			traceResponse.Code, traceResponse.Header().Get("Content-Type"), traceResponse.Body)
+	}
+}
+
+func TestTraceEndpointRejectsInvalidAndMissingIDs(t *testing.T) {
+	handler := newTestRouter(t, config.Config{Provider: "mock"})
+	for _, test := range []struct {
+		id        string
+		status    int
+		errorCode string
+	}{
+		{id: "invalid", status: http.StatusBadRequest, errorCode: "invalid_trace_id"},
+		{id: strings.Repeat("0", 32), status: http.StatusNotFound, errorCode: "trace_not_found"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/trace/"+test.id, nil))
+		if response.Code != test.status || !strings.Contains(response.Body.String(), test.errorCode) {
+			t.Fatalf("trace %q returned status=%d body=%s", test.id, response.Code, response.Body)
+		}
+	}
+}
+
+func TestConversationTraceIncludesToolSubcalls(t *testing.T) {
+	traceDir := t.TempDir()
+	conversationID, err := trace.NewID()
+	if err != nil {
+		t.Fatalf("create conversation ID: %v", err)
+	}
+	recorder, err := trace.NewRecorder(traceDir, conversationID, "POST /v1/chat/completions")
+	if err != nil {
+		t.Fatalf("create parent trace: %v", err)
+	}
+	if err := recorder.End("completed", 0); err != nil {
+		t.Fatalf("finish parent trace: %v", err)
+	}
+
+	handler := newTestRouter(t, config.Config{Provider: "mock", TraceDir: traceDir})
+	childIDs := make([]string, 0, 2)
+	for _, text := range []string{"first child", "second child"} {
+		request := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/tools/execute",
+			strings.NewReader(`{"tool":"inspect_text","arguments":{"text":"`+text+`"}}`),
+		)
+		request.Header.Set("X-Conversation-ID", conversationID)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("child tool status = %d, body=%s", response.Code, response.Body)
+		}
+		var child struct {
+			TraceID string `json:"trace_id"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &child); err != nil {
+			t.Fatalf("decode child tool response: %v", err)
+		}
+		childIDs = append(childIDs, child.TraceID)
+	}
+
+	combined := httptest.NewRecorder()
+	handler.ServeHTTP(combined, httptest.NewRequest(http.MethodGet, "/v1/trace/"+conversationID, nil))
+	body := combined.Body.String()
+	if combined.Code != http.StatusOK ||
+		strings.Count(body, `"kind":"tool"`) != 2 ||
+		strings.Index(body, `"kind":"tool"`) < strings.Index(body, `"kind":"run_start"`) ||
+		strings.LastIndex(body, `"kind":"tool"`) > strings.LastIndex(body, `"kind":"run_end"`) ||
+		!strings.Contains(body, `"conversation_id":"`+conversationID+`"`) {
+		t.Fatalf("parent trace does not include linked child tool event: status=%d body=%s", combined.Code, body)
+	}
+	for _, childID := range childIDs {
+		if !strings.Contains(body, `"trace_id":"`+childID+`"`) {
+			t.Fatalf("parent event does not link child trace ID %q: %s", childID, body)
+		}
 	}
 }

@@ -78,9 +78,13 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 	approvals := newApprovalStore()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
-	mux.HandleFunc("/v1/tools/execute", toolExecuteHandler(toolExecutor, approvals, cfg.ToolsAllowWrites))
+	mux.HandleFunc(
+		"/v1/tools/execute",
+		toolExecuteHandler(cfg.TraceDir, toolExecutor, approvals, cfg.ToolsAllowWrites),
+	)
 	mux.HandleFunc("/v1/tools/approvals", toolApprovalPrepareHandler(approvals, cfg.ToolsAllowWrites))
 	mux.HandleFunc("/v1/tools/approvals/", toolApprovalConfirmHandler(approvals, cfg.ToolApprovalToken, cfg.ToolsAllowWrites))
+	mux.HandleFunc("/v1/trace/", traceQueryHandler(cfg.TraceDir))
 	mux.HandleFunc("/v1/chat/completions", chatHandler(
 		guardedAdapter,
 		cfg.TraceDir,
