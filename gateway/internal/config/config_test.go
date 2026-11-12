@@ -26,6 +26,8 @@ func TestLoadUsesGatewayDefaults(t *testing.T) {
 	t.Setenv("GATEWAY_BUDGET_MAX_OUTPUT_TOKENS", "")
 	t.Setenv("GATEWAY_BUDGET_STATE_FILE", "")
 	t.Setenv("GATEWAY_TOOL_WORKSPACE", "")
+	t.Setenv("GATEWAY_TOOLS_ALLOW_WRITES", "")
+	t.Setenv("GATEWAY_TOOL_APPROVAL_TOKEN", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -55,6 +57,9 @@ func TestLoadUsesGatewayDefaults(t *testing.T) {
 	}
 	if cfg.ToolWorkspace != ".." {
 		t.Fatalf("tool workspace = %q, want ..", cfg.ToolWorkspace)
+	}
+	if cfg.ToolsAllowWrites || cfg.ToolApprovalToken != "" {
+		t.Fatalf("write tools must default to disabled: %+v", cfg)
 	}
 }
 
@@ -100,6 +105,8 @@ func TestLoadUsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("GATEWAY_BUDGET_MAX_OUTPUT_TOKENS", "2048")
 	t.Setenv("GATEWAY_BUDGET_STATE_FILE", "state/budget.json")
 	t.Setenv("GATEWAY_TOOL_WORKSPACE", "workspace")
+	t.Setenv("GATEWAY_TOOLS_ALLOW_WRITES", "true")
+	t.Setenv("GATEWAY_TOOL_APPROVAL_TOKEN", "test-approval-secret-32-characters")
 
 	cfg, err := Load()
 	if err != nil {
@@ -122,5 +129,24 @@ func TestLoadUsesEnvironmentOverrides(t *testing.T) {
 	}
 	if cfg.ToolWorkspace != "workspace" {
 		t.Fatalf("tool workspace = %q, want workspace", cfg.ToolWorkspace)
+	}
+	if !cfg.ToolsAllowWrites || cfg.ToolApprovalToken != "test-approval-secret-32-characters" {
+		t.Fatalf("write tool overrides not applied: %+v", cfg)
+	}
+}
+
+func TestLoadRequiresApprovalTokenWhenWritesAreEnabled(t *testing.T) {
+	t.Setenv("GATEWAY_TOOLS_ALLOW_WRITES", "true")
+	t.Setenv("GATEWAY_TOOL_APPROVAL_TOKEN", "short")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() accepted write tools without an approval token")
+	}
+}
+
+func TestLoadRejectsInvalidWriteToggle(t *testing.T) {
+	t.Setenv("GATEWAY_TOOLS_ALLOW_WRITES", "sometimes")
+	t.Setenv("GATEWAY_TOOL_APPROVAL_TOKEN", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() accepted an invalid write toggle")
 	}
 }

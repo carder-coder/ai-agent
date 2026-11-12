@@ -61,3 +61,17 @@ func TestValidateArgumentsRejectsUnsupportedSchemaKeyword(t *testing.T) {
 		t.Fatalf("ValidateArguments() = (%v, %v), want an invalid registered-schema error", issues, arguments)
 	}
 }
+
+func TestWriteNoteSchemaRejectsPathSeparators(t *testing.T) {
+	definition, exists := Lookup("write_note")
+	if !exists {
+		t.Fatal("write_note is not registered")
+	}
+	issues, arguments := ValidateArguments(
+		json.RawMessage(`{"filename":"../escape.txt","content":"no"}`),
+		definition,
+	)
+	if len(issues) != 1 || issues[0].Field != "arguments.filename" || arguments != nil {
+		t.Fatalf("ValidateArguments() = (%v, %v), want a filename format error", issues, arguments)
+	}
+}

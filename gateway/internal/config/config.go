@@ -44,6 +44,8 @@ type Config struct {
 	BudgetMaxOutputTokens  int
 	BudgetStateFile        string
 	ToolWorkspace          string
+	ToolsAllowWrites       bool
+	ToolApprovalToken      string
 }
 
 // Load 读取 .env 与进程环境变量，校验参数后返回配置。
@@ -127,6 +129,14 @@ func Load() (Config, error) {
 	if budgetMaxOutputTokens < 1 || budgetMaxOutputTokens > 1_000_000 {
 		return Config{}, fmt.Errorf("GATEWAY_BUDGET_MAX_OUTPUT_TOKENS 必须在 1 到 1000000 之间")
 	}
+	toolsAllowWrites, err := boolEnv("GATEWAY_TOOLS_ALLOW_WRITES", false)
+	if err != nil {
+		return Config{}, err
+	}
+	toolApprovalToken := stringEnv("GATEWAY_TOOL_APPROVAL_TOKEN", "")
+	if toolsAllowWrites && len(toolApprovalToken) < 32 {
+		return Config{}, fmt.Errorf("启用 GATEWAY_TOOLS_ALLOW_WRITES 时 GATEWAY_TOOL_APPROVAL_TOKEN 至少需要 32 个字符")
+	}
 
 	return Config{
 		Provider:       stringEnv("GATEWAY_PROVIDER", "doubao"),
@@ -153,6 +163,8 @@ func Load() (Config, error) {
 		BudgetMaxOutputTokens:  budgetMaxOutputTokens,
 		BudgetStateFile:        stringEnv("GATEWAY_BUDGET_STATE_FILE", "traces/budget.json"),
 		ToolWorkspace:          stringEnv("GATEWAY_TOOL_WORKSPACE", ".."),
+		ToolsAllowWrites:       toolsAllowWrites,
+		ToolApprovalToken:      toolApprovalToken,
 	}, nil
 }
 
@@ -248,6 +260,18 @@ func timeEnv(key string, fallback time.Duration) (time.Duration, error) {
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		return 0, fmt.Errorf("%s 必须是有效时长（例如 30s）：%w", key, err)
+	}
+	return parsed, nil
+}
+
+func boolEnv(key string, fallback bool) (bool, error) {
+	value, exists := os.LookupEnv(key)
+	if !exists || strings.TrimSpace(value) == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		return false, fmt.Errorf("%s 必须是 true 或 false：%w", key, err)
 	}
 	return parsed, nil
 }

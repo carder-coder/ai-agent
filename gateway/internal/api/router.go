@@ -38,6 +38,9 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 	if cfg.BudgetMaxOutputTokens == 0 {
 		cfg.BudgetMaxOutputTokens = config.DefaultBudgetMaxOutputTokens
 	}
+	if cfg.ToolsAllowWrites && len(strings.TrimSpace(cfg.ToolApprovalToken)) < 32 {
+		return nil, fmt.Errorf("GATEWAY_TOOL_APPROVAL_TOKEN must contain at least 32 characters when write tools are enabled")
+	}
 	registry := provider.NewRegistry()
 	if err := registry.Register("doubao", doubao.NewClient(cfg)); err != nil {
 		return nil, fmt.Errorf("register doubao provider: %w", err)
@@ -68,13 +71,16 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initialize budget ledger: %w", err)
 	}
-	toolExecutor, err := tools.NewExecutor(cfg.ToolWorkspace)
+	toolExecutor, err := tools.NewExecutor(cfg.ToolWorkspace, cfg.ToolsAllowWrites)
 	if err != nil {
 		return nil, fmt.Errorf("initialize tool executor: %w", err)
 	}
+	approvals := newApprovalStore()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
-	mux.HandleFunc("/v1/tools/execute", toolExecuteHandler(toolExecutor))
+	mux.HandleFunc("/v1/tools/execute", toolExecuteHandler(toolExecutor, approvals, cfg.ToolsAllowWrites))
+	mux.HandleFunc("/v1/tools/approvals", toolApprovalPrepareHandler(approvals, cfg.ToolsAllowWrites))
+	mux.HandleFunc("/v1/tools/approvals/", toolApprovalConfirmHandler(approvals, cfg.ToolApprovalToken, cfg.ToolsAllowWrites))
 	mux.HandleFunc("/v1/chat/completions", chatHandler(
 		guardedAdapter,
 		cfg.TraceDir,

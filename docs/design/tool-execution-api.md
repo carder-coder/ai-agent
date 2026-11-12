@@ -17,7 +17,7 @@
 - `tool` 必须是服务端注册的工具名；调用方不能提交可执行文件名或 shell 命令。
 - `arguments` 必须是对象，并按注册工具的 JSON Schema 校验。当前实现支持 `type`、
   `properties`、`required`、`items`、`enum`、`maxLength`、`maxItems` 与
-  `additionalProperties: false`；不支持的 schema 关键字不得用于放宽校验。
+  `pattern`、`additionalProperties: false`；不支持的 schema 关键字不得用于放宽校验。
 - `inspect_text` 统计文本字符数/词数；`workspace_status` 只接受 `short` 或 `branch` 输出格式，
   并映射至固定的 `git status` 参数。
 - 校验错误返回 `400 invalid_tool_arguments`，`error.details` 为字段路径和原因数组。
@@ -30,8 +30,8 @@
 ## 写操作审批
 
 写操作默认关闭。启用写能力需同时设置 `GATEWAY_TOOLS_ALLOW_WRITES=true` 和独立审批密钥
-`GATEWAY_TOOL_APPROVAL_TOKEN`。写工具只允许在配置的工具工作目录内创建受限文件，不接受
-绝对路径、路径分隔符或覆盖已有文件。
+`GATEWAY_TOOL_APPROVAL_TOKEN`（至少 32 个字符）。写工具只允许在配置的工具工作目录内创建受限
+文件，不接受绝对路径、路径分隔符或覆盖已有文件。
 
 1. 调用 `POST /v1/tools/approvals` 提交工具名和参数，取得短时有效的 `approval_id`。
 2. 审批人调用 `POST /v1/tools/approvals/{id}/confirm`，携带审批密钥并明确确认。
@@ -46,6 +46,8 @@
 - 成功返回 JSONL 原文（`application/x-ndjson`）；trace 不存在返回 `404 trace_not_found`。
 - trace 只记录工具参数、调用方标识、结果摘要、耗时和状态，不记录认证凭证。
 - trace 文件仅服务进程用户可读写；调用方身份由可信入口写入 `X-Caller-ID`。
+- 网关本身不认证普通调用方；部署时必须由可信认证代理删除外部传入的 `X-Caller-ID` 并写入
+  已认证身份，不得将写工具接口直接暴露到不可信网络。
 
 ## 审计与安全边界
 

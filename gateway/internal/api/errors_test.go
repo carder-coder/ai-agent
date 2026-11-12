@@ -291,6 +291,14 @@ func TestNewRouterRejectsUnregisteredProvider(t *testing.T) {
 	}
 }
 
+func TestNewRouterRejectsWritesWithoutApprovalToken(t *testing.T) {
+	if _, err := NewRouter(config.Config{
+		Provider: "mock", ToolsAllowWrites: true, ToolApprovalToken: "short",
+	}); err == nil {
+		t.Fatal("NewRouter() enabled write tools without an approval token")
+	}
+}
+
 func newTestRouter(t *testing.T, cfg config.Config) http.Handler {
 	t.Helper()
 	if cfg.MaxConcurrent == 0 {

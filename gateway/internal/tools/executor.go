@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,11 +19,15 @@ const (
 	maxCommandOutput = 16 << 10
 )
 
-var ErrTimeout = errors.New("tool execution timed out")
+var (
+	ErrTimeout        = errors.New("tool execution timed out")
+	ErrWritesDisabled = errors.New("write tools are disabled")
+)
 
 // Executor 将工具名称映射到固定实现，绝不把请求内容拼接为 shell 命令。
 type Executor struct {
-	workspace string
+	workspace   string
+	allowWrites bool
 }
 
 type commandSpec struct {
@@ -38,7 +43,7 @@ type cappedBuffer struct {
 }
 
 // NewExecutor 创建将命令限制在指定工作区的工具执行器。
-func NewExecutor(workspace string) (*Executor, error) {
+func NewExecutor(workspace string, allowWrites bool) (*Executor, error) {
 	if workspace == "" {
 		workspace = "."
 	}
@@ -53,12 +58,18 @@ func NewExecutor(workspace string) (*Executor, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("tool workspace must be a directory")
 	}
-	return &Executor{workspace: absolute}, nil
+	return &Executor{workspace: absolute, allowWrites: allowWrites}, nil
 }
 
 // Execute 运行纯计算工具或固定只读命令，并返回有界的结构化结果。
 func (e *Executor) Execute(ctx context.Context, name string, arguments map[string]any) (map[string]any, error) {
 	if name != "workspace_status" {
+		if name == "write_note" {
+			if !e.allowWrites {
+				return nil, ErrWritesDisabled
+			}
+			return e.writeNote(arguments)
+		}
 		return Execute(name, arguments)
 	}
 	spec, err := workspaceStatusCommand(arguments)
@@ -70,6 +81,41 @@ func (e *Executor) Execute(ctx context.Context, name string, arguments map[strin
 		return nil, err
 	}
 	return map[string]any{"output": output, "truncated": truncated}, nil
+}
+
+func (e *Executor) writeNote(arguments map[string]any) (map[string]any, error) {
+	filename, filenameOK := arguments["filename"].(string)
+	content, contentOK := arguments["content"].(string)
+	if !filenameOK || !contentOK || filename == "." || filename == ".." ||
+		strings.ContainsAny(filename, `/\`) || filepath.Base(filename) != filename {
+		return nil, fmt.Errorf("write_note arguments are invalid")
+	}
+	path := filepath.Join(e.workspace, filename)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("create note in tool workspace: %w", err)
+	}
+	written, writeErr := file.Write([]byte(content))
+	closeErr := file.Close()
+	if writeErr == nil && written != len(content) {
+		writeErr = errors.New("short write")
+	}
+	if writeErr != nil || closeErr != nil {
+		removeErr := os.Remove(path)
+		return nil, errors.Join(
+			wrapToolError("write note", writeErr),
+			wrapToolError("close note", closeErr),
+			wrapToolError("remove incomplete note", removeErr),
+		)
+	}
+	return map[string]any{"filename": filename, "bytes_written": written}, nil
+}
+
+func wrapToolError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }
 
 func workspaceStatusCommand(arguments map[string]any) (commandSpec, error) {

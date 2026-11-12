@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"unicode/utf8"
 )
@@ -22,6 +23,7 @@ type schema struct {
 	Required             []string          `json:"required"`
 	Items                *schema           `json:"items"`
 	Enum                 []any             `json:"enum"`
+	Pattern              string            `json:"pattern"`
 	MaxLength            int               `json:"maxLength"`
 	MaxItems             int               `json:"maxItems"`
 	AdditionalProperties *bool             `json:"additionalProperties"`
@@ -57,6 +59,11 @@ func validSchema(rule schema) bool {
 	}
 	if rule.MaxLength < 0 || rule.MaxItems < 0 {
 		return false
+	}
+	if rule.Pattern != "" {
+		if _, err := regexp.Compile(rule.Pattern); err != nil {
+			return false
+		}
 	}
 	for _, property := range rule.Properties {
 		if !validSchema(property) {
@@ -120,6 +127,9 @@ func validateValue(path string, value any, rule schema) []FieldError {
 			errors = append(errors, FieldError{
 				Field: path, Message: fmt.Sprintf("must contain at most %d characters", rule.MaxLength),
 			})
+		}
+		if rule.Pattern != "" && !regexp.MustCompile(rule.Pattern).MatchString(typed) {
+			errors = append(errors, FieldError{Field: path, Message: "does not match the required format"})
 		}
 	case []any:
 		if rule.MaxItems > 0 && len(typed) > rule.MaxItems {

@@ -68,7 +68,7 @@ func TestExecutorRunsWorkspaceStatusInConfiguredDirectory(t *testing.T) {
 		t.Fatalf("initialize temporary repository: %v: %s", err, output)
 	}
 
-	executor, err := NewExecutor(workspace)
+	executor, err := NewExecutor(workspace, false)
 	if err != nil {
 		t.Fatalf("NewExecutor() error = %v", err)
 	}
@@ -96,7 +96,7 @@ func TestNewExecutorRejectsUnresolvableWorkspace(t *testing.T) {
 	if err := os.WriteFile(file, []byte("not a directory"), 0o600); err != nil {
 		t.Fatalf("create workspace test file: %v", err)
 	}
-	if _, err := NewExecutor(file); err == nil {
+	if _, err := NewExecutor(file, false); err == nil {
 		t.Fatal("NewExecutor accepted a file as the tool workspace")
 	}
 }

@@ -42,6 +42,20 @@ var definitions = map[string]Definition{
 			"additionalProperties":false
 		}`),
 	},
+	"write_note": {
+		Name:        "write_note",
+		Description: "在工具工作区内新建一条文本记录；不得覆盖已有文件。",
+		Write:       true,
+		Schema: json.RawMessage(`{
+			"type":"object",
+			"properties":{
+				"filename":{"type":"string","maxLength":64,"pattern":"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+				"content":{"type":"string","maxLength":4096}
+			},
+			"required":["filename","content"],
+			"additionalProperties":false
+		}`),
+	},
 }
 
 // Lookup 返回已注册工具的定义；未知名称不会触发动态命令执行。
