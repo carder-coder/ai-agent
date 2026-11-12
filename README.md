@@ -159,6 +159,21 @@ Python 是 Agent 侧，Go 是服务侧；Go module 位于 `gateway/`，在该目
 再从 `gateway/` 目录运行 `go run ./cmd/loadtest --n 200 --c 200`。Docker Compose 部署入口为
 `docker compose -f deploy/docker-compose.yml up --build`；Compose 默认使用 mock，不会调用真实模型。
 
+## 本机 Go 环境（CGO 与 race）
+
+`go test -race` 在 Windows 上要求 CGO 启用并由 gcc 链接，本机用 MSYS2 的 UCRT64 GCC：
+
+- 编译器：`C:\msys64\ucrt64\bin\gcc.exe`（`mingw-w64-ucrt-x86_64-gcc 16.2.0`，MSYS2 安装包 20260927）
+- 持久配置：`go env -w CGO_ENABLED=1 CC=C:/msys64/ucrt64/bin/gcc.exe`，落在 `%APPDATA%\go\env`
+- `C:\msys64\ucrt64\bin` 已追加到用户级 PATH。gcc.exe 自身要加载同目录的 DLL，缺这一步链接会报
+  `running C:/msys64/ucrt64/bin/gcc.exe failed`；race 二进制运行同样依赖该目录，不能只在 `CC` 里写绝对路径
+- PATH 变更只对新开的终端生效；当前会话临时用可先 `$env:PATH += ";C:\msys64\ucrt64\bin"`
+- 2026-11-11 实测：`gateway/` 内 `go test -race ./...` 14 个包全部通过（无数据竞争告警），
+  `go test ./...` 与 `go vet ./...` 同时通过；race 检测器有效性用一段故意竞争的样例程序验证过
+- pacman 源已切到中科大（官方 `mirror.msys2.org` 返回 403、`repo.msys2.org` 超时），改动在
+  `C:\msys64\etc\pacman.d\mirrorlist.msys` 与 `mirrorlist.mingw`，装包用
+  `pacman -S mingw-w64-ucrt-x86_64-gcc`
+
 ## 远程仓库
 
 origin 指向 https://github.com/carder-coder/ai-agent.git，主分支 main。
