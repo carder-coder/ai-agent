@@ -31,6 +31,17 @@ var definitions = map[string]Definition{
 			"additionalProperties":false
 		}`),
 	},
+	"workspace_status": {
+		Name:        "workspace_status",
+		Description: "读取配置工作区的 Git 状态，不接受自定义命令或参数。",
+		Schema: json.RawMessage(`{
+			"type":"object",
+			"properties":{
+				"format":{"type":"string","enum":["short","branch"],"maxLength":6}
+			},
+			"additionalProperties":false
+		}`),
+	},
 }
 
 // Lookup 返回已注册工具的定义；未知名称不会触发动态命令执行。

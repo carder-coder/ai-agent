@@ -77,3 +77,16 @@ func TestToolExecuteRejectsUnknownToolsAndUnknownRequestFields(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkspaceStatusRejectsCommandLikeArguments(t *testing.T) {
+	handler := newTestRouter(t, config.Config{Provider: "mock"})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost,
+		"/v1/tools/execute",
+		strings.NewReader(`{"tool":"workspace_status","arguments":{"format":"short; whoami"}}`),
+	))
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid_tool_arguments") {
+		t.Fatalf("command-like argument was not rejected: status=%d body=%s", response.Code, response.Body)
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"github.com/carder-coder/ai-agent/gateway/internal/provider/mock"
 	"github.com/carder-coder/ai-agent/gateway/internal/retry"
 	"github.com/carder-coder/ai-agent/gateway/internal/routing"
+	"github.com/carder-coder/ai-agent/gateway/internal/tools"
 )
 
 // NewRouter 根据配置装配 Provider、路由和中间件，返回可直接运行的 HTTP handler。
@@ -67,9 +68,13 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initialize budget ledger: %w", err)
 	}
+	toolExecutor, err := tools.NewExecutor(cfg.ToolWorkspace)
+	if err != nil {
+		return nil, fmt.Errorf("initialize tool executor: %w", err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
-	mux.HandleFunc("/v1/tools/execute", toolExecuteHandler())
+	mux.HandleFunc("/v1/tools/execute", toolExecuteHandler(toolExecutor))
 	mux.HandleFunc("/v1/chat/completions", chatHandler(
 		guardedAdapter,
 		cfg.TraceDir,

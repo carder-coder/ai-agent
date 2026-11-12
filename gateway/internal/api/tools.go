@@ -27,7 +27,7 @@ type toolResponse struct {
 }
 
 // toolExecuteHandler 只执行固定注册的工具，并在任何操作前完成完整参数校验。
-func toolExecuteHandler() http.HandlerFunc {
+func toolExecuteHandler(executor *tools.Executor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")
@@ -70,9 +70,13 @@ func toolExecuteHandler() http.HandlerFunc {
 		}
 
 		started := time.Now()
-		result, err := tools.Execute(request.Tool, arguments)
+		result, err := executor.Execute(r.Context(), request.Tool, arguments)
 		if err != nil {
 			log.Printf("工具执行失败 tool=%s trace_id=%s: %v", request.Tool, trace.IDFromContext(r.Context()), err)
+			if errors.Is(err, tools.ErrTimeout) {
+				writeError(w, http.StatusGatewayTimeout, "tool execution timed out", "timeout", "tool_timeout")
+				return
+			}
 			writeError(w, http.StatusBadGateway, "tool execution failed", "server_error", "tool_execution_failed")
 			return
 		}

@@ -25,6 +25,7 @@ func TestLoadUsesGatewayDefaults(t *testing.T) {
 	t.Setenv("GATEWAY_REQUEST_MAX_COST_YUAN", "")
 	t.Setenv("GATEWAY_BUDGET_MAX_OUTPUT_TOKENS", "")
 	t.Setenv("GATEWAY_BUDGET_STATE_FILE", "")
+	t.Setenv("GATEWAY_TOOL_WORKSPACE", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -51,6 +52,9 @@ func TestLoadUsesGatewayDefaults(t *testing.T) {
 	if cfg.DailyBudgetYuan != 100 || cfg.RequestMaxCostYuan != 0.5 ||
 		cfg.BudgetMaxOutputTokens != 4096 || cfg.BudgetStateFile != "traces/budget.json" {
 		t.Fatalf("unexpected budget defaults: %+v", cfg)
+	}
+	if cfg.ToolWorkspace != ".." {
+		t.Fatalf("tool workspace = %q, want ..", cfg.ToolWorkspace)
 	}
 }
 
@@ -95,6 +99,7 @@ func TestLoadUsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("GATEWAY_REQUEST_MAX_COST_YUAN", "0.25")
 	t.Setenv("GATEWAY_BUDGET_MAX_OUTPUT_TOKENS", "2048")
 	t.Setenv("GATEWAY_BUDGET_STATE_FILE", "state/budget.json")
+	t.Setenv("GATEWAY_TOOL_WORKSPACE", "workspace")
 
 	cfg, err := Load()
 	if err != nil {
@@ -114,5 +119,8 @@ func TestLoadUsesEnvironmentOverrides(t *testing.T) {
 	if cfg.DailyBudgetYuan != 200 || cfg.RequestMaxCostYuan != 0.25 ||
 		cfg.BudgetMaxOutputTokens != 2048 || cfg.BudgetStateFile != "state/budget.json" {
 		t.Fatalf("budget overrides not applied: %+v", cfg)
+	}
+	if cfg.ToolWorkspace != "workspace" {
+		t.Fatalf("tool workspace = %q, want workspace", cfg.ToolWorkspace)
 	}
 }

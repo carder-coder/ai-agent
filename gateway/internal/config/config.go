@@ -43,6 +43,7 @@ type Config struct {
 	RequestMaxCostYuan     float64
 	BudgetMaxOutputTokens  int
 	BudgetStateFile        string
+	ToolWorkspace          string
 }
 
 // Load 读取 .env 与进程环境变量，校验参数后返回配置。
@@ -151,6 +152,7 @@ func Load() (Config, error) {
 		RequestMaxCostYuan:     requestMaxCost,
 		BudgetMaxOutputTokens:  budgetMaxOutputTokens,
 		BudgetStateFile:        stringEnv("GATEWAY_BUDGET_STATE_FILE", "traces/budget.json"),
+		ToolWorkspace:          stringEnv("GATEWAY_TOOL_WORKSPACE", ".."),
 	}, nil
 }
 

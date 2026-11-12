@@ -16,8 +16,10 @@
 
 - `tool` 必须是服务端注册的工具名；调用方不能提交可执行文件名或 shell 命令。
 - `arguments` 必须是对象，并按注册工具的 JSON Schema 校验。当前实现支持 `type`、
-  `properties`、`required`、`enum`、`maxLength`、`maxItems` 与
+  `properties`、`required`、`items`、`enum`、`maxLength`、`maxItems` 与
   `additionalProperties: false`；不支持的 schema 关键字不得用于放宽校验。
+- `inspect_text` 统计文本字符数/词数；`workspace_status` 只接受 `short` 或 `branch` 输出格式，
+  并映射至固定的 `git status` 参数。
 - 校验错误返回 `400 invalid_tool_arguments`，`error.details` 为字段路径和原因数组。
 - 未注册工具返回 `404 tool_not_found`；超时返回 `504 tool_timeout`；其他执行错误返回
   `502 tool_execution_failed`。所有响应均使用统一 `error` envelope。
@@ -49,6 +51,7 @@
 
 - 工具使用服务端固定注册表和 JSON Schema；命令以独立可执行文件及固定参数调用，禁止拼接
   shell 字符串或经 shell 解释。
+- 命令只继承 `PATH` 与操作系统必要变量，并强制关闭 Git 全局/系统配置及 fsmonitor。
 - 命令工具只开放只读白名单；写操作走独立审批流程，并在实现侧再次检查工作目录边界。
 - 审计事件至少包含调用方、工具名、校验后的参数、结果摘要、耗时和完成状态；错误响应不泄漏
   命令行、环境变量、凭证或完整工具输出。
