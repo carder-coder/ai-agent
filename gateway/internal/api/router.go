@@ -69,6 +69,7 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
+	mux.HandleFunc("/v1/tools/execute", toolExecuteHandler())
 	mux.HandleFunc("/v1/chat/completions", chatHandler(
 		guardedAdapter,
 		cfg.TraceDir,
