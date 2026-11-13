@@ -1,0 +1,184 @@
+{
+  "version": 1,
+  "description": "网关工具接口的越权与注入样本集；每条用例都断言 HTTP 状态与错误码，且不得在工作区产生任何文件。",
+  "cases": [
+    {
+      "name": "enum_shell_metachar",
+      "endpoint": "execute",
+      "body": {"tool": "workspace_status", "arguments": {"format": "short; whoami"}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments",
+      "note": "分号拼接命令在 schema 枚举处即被拒绝"
+    },
+    {
+      "name": "enum_command_substitution",
+      "endpoint": "execute",
+      "body": {"tool": "workspace_status", "arguments": {"format": "$(whoami)"}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments",
+      "note": "命令替换语法不是合法枚举值"
+    },
+    {
+      "name": "enum_backtick",
+      "endpoint": "execute",
+      "body": {"tool": "workspace_status", "arguments": {"format": "`id`"}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments",
+      "note": "反引号子命令不是合法枚举值"
+    },
+    {
+      "name": "enum_newline_injection",
+      "endpoint": "execute",
+      "body": {"tool": "workspace_status", "arguments": {"format": "short\nbranch"}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments",
+      "note": "换行符试图追加第二行参数"
+    },
+    {
+      "name": "enum_pipe_and_redirect",
+      "endpoint": "execute",
+      "body": {"tool": "workspace_status", "arguments": {"format": "short|cat /etc/passwd"}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments"
+    },
+    {
+      "name": "enum_fullwidth_bypass",
+      "endpoint": "execute",
+      "body": {"tool": "workspace_status", "arguments": {"format": "ｓｈｏｒｔ"}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments",
+      "note": "全角字符不能绕过枚举比较"
+    },
+    {
+      "name": "extra_field_command",
+      "endpoint": "execute",
+      "body": {"tool": "inspect_text", "arguments": {"text": "ok", "command": "whoami"}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments",
+      "note": "additionalProperties=false 拒绝多余字段"
+    },
+    {
+      "name": "text_type_number",
+      "endpoint": "execute",
+      "body": {"tool": "inspect_text", "arguments": {"text": 42}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments"
+    },
+    {
+      "name": "text_nested_object",
+      "endpoint": "execute",
+      "body": {"tool": "inspect_text", "arguments": {"text": {"cmd": "whoami"}}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments"
+    },
+    {
+      "name": "text_null",
+      "endpoint": "execute",
+      "body": {"tool": "inspect_text", "arguments": {"text": null}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments"
+    },
+    {
+      "name": "text_array",
+      "endpoint": "execute",
+      "body": {"tool": "inspect_text", "arguments": {"text": ["a", "b"]}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments"
+    },
+    {
+      "name": "unknown_tool",
+      "endpoint": "execute",
+      "body": {"tool": "shell_exec", "arguments": {"command": "whoami"}},
+      "expect_status": 404,
+      "expect_code": "tool_not_found",
+      "note": "未注册工具不会触发动态命令执行"
+    },
+    {
+      "name": "unknown_tool_case_variant",
+      "endpoint": "execute",
+      "body": {"tool": "Inspect_Text", "arguments": {"text": "ok"}},
+      "expect_status": 404,
+      "expect_code": "tool_not_found"
+    },
+    {
+      "name": "write_with_forged_approval",
+      "endpoint": "execute",
+      "caller": "agent-worker",
+      "body": {"tool": "write_note", "arguments": {"filename": "forged.txt", "content": "x"}, "approval_id": "0123456789abcdef0123456789abcdef"},
+      "expect_status": 404,
+      "expect_code": "approval_not_found",
+      "note": "伪造审批号不能落盘"
+    },
+    {
+      "name": "write_without_caller_id",
+      "endpoint": "execute",
+      "body": {"tool": "write_note", "arguments": {"filename": "nocaller.txt", "content": "x"}, "approval_id": "0123456789abcdef0123456789abcdef"},
+      "expect_status": 400,
+      "expect_code": "caller_id_required"
+    },
+    {
+      "name": "approval_path_traversal",
+      "endpoint": "approval_prepare",
+      "caller": "agent-worker",
+      "body": {"tool": "write_note", "arguments": {"filename": "../escape.txt", "content": "x"}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments"
+    },
+    {
+      "name": "approval_absolute_path",
+      "endpoint": "approval_prepare",
+      "caller": "agent-worker",
+      "body": {"tool": "write_note", "arguments": {"filename": "C:\\Windows\\evil.txt", "content": "x"}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments"
+    },
+    {
+      "name": "approval_subdirectory",
+      "endpoint": "approval_prepare",
+      "caller": "agent-worker",
+      "body": {"tool": "write_note", "arguments": {"filename": "sub/dir.txt", "content": "x"}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments"
+    },
+    {
+      "name": "approval_empty_filename",
+      "endpoint": "approval_prepare",
+      "caller": "agent-worker",
+      "body": {"tool": "write_note", "arguments": {"filename": "", "content": "x"}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments"
+    },
+    {
+      "name": "approval_overlong_filename",
+      "endpoint": "approval_prepare",
+      "caller": "agent-worker",
+      "body": {"tool": "write_note", "arguments": {"filename": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt", "content": "x"}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments"
+    },
+    {
+      "name": "approval_missing_content",
+      "endpoint": "approval_prepare",
+      "caller": "agent-worker",
+      "body": {"tool": "write_note", "arguments": {"filename": "ok.txt"}},
+      "expect_status": 400,
+      "expect_code": "invalid_tool_arguments"
+    },
+    {
+      "name": "approval_readonly_tool",
+      "endpoint": "approval_prepare",
+      "caller": "agent-worker",
+      "body": {"tool": "inspect_text", "arguments": {"text": "ok"}},
+      "expect_status": 400,
+      "expect_code": "approval_not_required"
+    },
+    {
+      "name": "approval_unknown_tool",
+      "endpoint": "approval_prepare",
+      "caller": "agent-worker",
+      "body": {"tool": "write_file", "arguments": {"filename": "ok.txt", "content": "x"}},
+      "expect_status": 404,
+      "expect_code": "tool_not_found"
+    }
+  ]
+}

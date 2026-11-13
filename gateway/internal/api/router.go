@@ -15,6 +15,7 @@ import (
 	"github.com/carder-coder/ai-agent/gateway/internal/metrics"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider/doubao"
+	"github.com/carder-coder/ai-agent/gateway/internal/provider/failover"
 	"github.com/carder-coder/ai-agent/gateway/internal/provider/mock"
 	"github.com/carder-coder/ai-agent/gateway/internal/retry"
 	"github.com/carder-coder/ai-agent/gateway/internal/routing"
@@ -52,13 +53,28 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 	if providerName == "" {
 		providerName = "doubao"
 	}
-	adapter, err := registry.Get(providerName)
-	if err != nil {
-		return nil, err
+	guardedAdapters := make(map[string]provider.Adapter, 2)
+	for _, name := range []string{providerName, strings.TrimSpace(cfg.ProviderBackup)} {
+		if name == "" {
+			continue
+		}
+		adapter, err := registry.Get(name)
+		if err != nil {
+			return nil, err
+		}
+		guardedAdapter, err := retry.NewAdapter(adapter, cfg.MaxRetries)
+		if err != nil {
+			return nil, err
+		}
+		guardedAdapters[name] = guardedAdapter
 	}
-	guardedAdapter, err := retry.NewAdapter(adapter, cfg.MaxRetries)
+	failoverThreshold := cfg.FailoverThreshold
+	if failoverThreshold < 1 {
+		failoverThreshold = 1
+	}
+	providerManager, err := failover.New(providerName, cfg.ProviderBackup, guardedAdapters, failoverThreshold)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("initialize provider failover: %w", err)
 	}
 
 	collector := metrics.New()
@@ -82,11 +98,12 @@ func NewRouter(cfg config.Config) (http.Handler, error) {
 		"/v1/tools/execute",
 		toolExecuteHandler(cfg.TraceDir, toolExecutor, approvals, cfg.ToolsAllowWrites),
 	)
-	mux.HandleFunc("/v1/tools/approvals", toolApprovalPrepareHandler(approvals, cfg.ToolsAllowWrites))
-	mux.HandleFunc("/v1/tools/approvals/", toolApprovalConfirmHandler(approvals, cfg.ToolApprovalToken, cfg.ToolsAllowWrites))
+	mux.HandleFunc("/v1/tools/approvals", toolApprovalPrepareHandler(cfg.TraceDir, approvals, cfg.ToolsAllowWrites))
+	mux.HandleFunc("/v1/tools/approvals/", toolApprovalConfirmHandler(cfg.TraceDir, approvals, cfg.ToolApprovalToken, cfg.ToolsAllowWrites))
 	mux.HandleFunc("/v1/trace/", traceQueryHandler(cfg.TraceDir))
+	mux.HandleFunc("/v1/admin/provider", adminProviderHandler(providerManager, cfg.AdminToken, cfg.TraceDir))
 	mux.HandleFunc("/v1/chat/completions", chatHandler(
-		guardedAdapter,
+		providerManager,
 		cfg.TraceDir,
 		collector,
 		cost.Prices{Input: cfg.PriceIn, Output: cfg.PriceOut, Cached: cfg.PriceCached},

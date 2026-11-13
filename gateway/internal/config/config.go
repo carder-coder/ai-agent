@@ -46,6 +46,9 @@ type Config struct {
 	ToolWorkspace          string
 	ToolsAllowWrites       bool
 	ToolApprovalToken      string
+	ProviderBackup         string
+	FailoverThreshold      int
+	AdminToken             string
 }
 
 // Load 读取 .env 与进程环境变量，校验参数后返回配置。
@@ -137,6 +140,18 @@ func Load() (Config, error) {
 	if toolsAllowWrites && len(toolApprovalToken) < 32 {
 		return Config{}, fmt.Errorf("启用 GATEWAY_TOOLS_ALLOW_WRITES 时 GATEWAY_TOOL_APPROVAL_TOKEN 至少需要 32 个字符")
 	}
+	providerBackup := stringEnv("GATEWAY_PROVIDER_BACKUP", "")
+	failoverThreshold, err := intEnv("GATEWAY_FAILOVER_THRESHOLD", 3)
+	if err != nil {
+		return Config{}, err
+	}
+	if failoverThreshold < 1 || failoverThreshold > 10 {
+		return Config{}, fmt.Errorf("GATEWAY_FAILOVER_THRESHOLD 必须在 1 到 10 之间")
+	}
+	adminToken := stringEnv("GATEWAY_ADMIN_TOKEN", "")
+	if len(adminToken) > 0 && len(adminToken) < 32 {
+		return Config{}, fmt.Errorf("设置 GATEWAY_ADMIN_TOKEN 时至少需要 32 个字符")
+	}
 
 	return Config{
 		Provider:       stringEnv("GATEWAY_PROVIDER", "doubao"),
@@ -162,9 +177,12 @@ func Load() (Config, error) {
 		RequestMaxCostYuan:     requestMaxCost,
 		BudgetMaxOutputTokens:  budgetMaxOutputTokens,
 		BudgetStateFile:        stringEnv("GATEWAY_BUDGET_STATE_FILE", "traces/budget.json"),
-		ToolWorkspace:          stringEnv("GATEWAY_TOOL_WORKSPACE", ".."),
+		ToolWorkspace:          stringEnv("GATEWAY_TOOL_WORKSPACE", "tool-workspace"),
 		ToolsAllowWrites:       toolsAllowWrites,
 		ToolApprovalToken:      toolApprovalToken,
+		ProviderBackup:         providerBackup,
+		FailoverThreshold:      failoverThreshold,
+		AdminToken:             adminToken,
 	}, nil
 }
 

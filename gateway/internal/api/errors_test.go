@@ -307,6 +307,9 @@ func newTestRouter(t *testing.T, cfg config.Config) http.Handler {
 	if cfg.TraceDir == "" {
 		cfg.TraceDir = t.TempDir()
 	}
+	if cfg.ToolWorkspace == "" {
+		cfg.ToolWorkspace = t.TempDir()
+	}
 	handler, err := NewRouter(cfg)
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v", err)

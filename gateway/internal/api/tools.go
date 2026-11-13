@@ -3,7 +3,9 @@ package api
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -205,49 +207,113 @@ type approvalConfirmation struct {
 	Confirmed bool `json:"confirmed"`
 }
 
-// toolApprovalPrepareHandler 为已校验的写工具参数创建短时审批请求。
-func toolApprovalPrepareHandler(approvals *approvalStore, allowWrites bool) http.HandlerFunc {
+// approvalAudit 统一记录审批请求的发起、确认与失败原因。
+type approvalAudit struct {
+	recorder *trace.Recorder
+	event    trace.ApprovalEvent
+	started  time.Time
+}
+
+// beginApprovalAudit 为审批请求开启独立 trace；审计不可用时由调用方失败关闭。
+func beginApprovalAudit(traceDir, action string, r *http.Request) (*approvalAudit, error) {
+	recorder, err := trace.NewRecorder(traceDir, trace.IDFromContext(r.Context()), r.Method+" "+r.URL.Path)
+	if err != nil {
+		return nil, err
+	}
+	return &approvalAudit{
+		recorder: recorder,
+		started:  time.Now(),
+		event: trace.ApprovalEvent{
+			Action: action,
+			Caller: callerIDFromRequest(r),
+		},
+	}, nil
+}
+
+// finish 写入审批事件与 run_end；写入失败只记录日志，不改变已返回的结果。
+func (a *approvalAudit) finish(status string) {
+	a.event.Status = status
+	a.event.DurationMS = time.Since(a.started).Milliseconds()
+	if err := a.recorder.RecordApproval(a.event); err != nil {
+		log.Printf("写入审批审计事件失败 approval_id=%s: %v", a.event.ApprovalID, err)
+	}
+	if err := a.recorder.End(status, 1); err != nil {
+		log.Printf("结束审批审计 trace 失败 approval_id=%s: %v", a.event.ApprovalID, err)
+	}
+}
+
+// approvalKeyID 用审批密钥摘要标识确认人，避免把密钥原文写进审计。
+func approvalKeyID(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return "token-sha256:" + hex.EncodeToString(digest[:])[:12]
+}
+
+// toolApprovalPrepareHandler 为已校验的写工具参数创建短时审批请求，并落审计。
+func toolApprovalPrepareHandler(traceDir string, approvals *approvalStore, allowWrites bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		status := "invalid_request"
+		audit, auditErr := beginApprovalAudit(traceDir, "prepare", r)
+		if audit != nil {
+			defer func() { audit.finish(status) }()
+		} else {
+			log.Printf("创建审批审计 trace 失败：%v", auditErr)
+		}
 		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")
+			status = "method_not_allowed"
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", status)
 			return
 		}
 		if !allowWrites {
-			writeError(w, http.StatusForbidden, "write tools are disabled", "permission_error", "tool_writes_disabled")
+			status = "tool_writes_disabled"
+			writeError(w, http.StatusForbidden, "write tools are disabled", "permission_error", status)
+			return
+		}
+		if audit == nil {
+			status = "trace_unavailable"
+			writeError(w, http.StatusServiceUnavailable, "approval audit trace is unavailable", "server_error", status)
 			return
 		}
 		callerID := callerIDFromRequest(r)
 		if callerID == "" {
-			writeError(w, http.StatusBadRequest, "X-Caller-ID is required for write tools", "invalid_request_error", "caller_id_required")
+			status = "caller_id_required"
+			writeError(w, http.StatusBadRequest, "X-Caller-ID is required for write tools", "invalid_request_error", status)
 			return
 		}
 		var request approvalPrepareRequest
 		if !decodeStrictRequest(w, r, &request) {
 			return
 		}
+		audit.event.Tool = request.Tool
+		audit.event.Parameters = auditParameters(request.Arguments)
 		definition, exists := tools.Lookup(request.Tool)
 		if !exists {
-			writeError(w, http.StatusNotFound, "tool is not registered", "invalid_request_error", "tool_not_found")
+			status = "tool_not_found"
+			writeError(w, http.StatusNotFound, "tool is not registered", "invalid_request_error", status)
 			return
 		}
 		if !definition.Write {
-			writeError(w, http.StatusBadRequest, "approval is only available for write tools", "invalid_request_error", "approval_not_required")
+			status = "approval_not_required"
+			writeError(w, http.StatusBadRequest, "approval is only available for write tools", "invalid_request_error", status)
 			return
 		}
 		issues, arguments := tools.ValidateArguments(request.Arguments, definition)
 		if len(issues) > 0 {
+			status = "invalid_tool_arguments"
 			details := make([]fieldError, len(issues))
 			for index, issue := range issues {
 				details[index] = fieldError{Field: issue.Field, Message: issue.Message}
 			}
-			writeDetailedError(w, http.StatusBadRequest, "tool arguments failed schema validation", "invalid_request_error", "invalid_tool_arguments", details)
+			writeDetailedError(w, http.StatusBadRequest, "tool arguments failed schema validation", "invalid_request_error", status, details)
 			return
 		}
 		id, expiresAt, err := approvals.Create(callerID, request.Tool, arguments)
 		if err != nil {
-			writeError(w, http.StatusServiceUnavailable, "approval service is unavailable", "server_error", "approval_unavailable")
+			status = "approval_unavailable"
+			writeError(w, http.StatusServiceUnavailable, "approval service is unavailable", "server_error", status)
 			return
 		}
+		audit.event.ApprovalID = id
+		status = "prepared"
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(approvalPrepareResponse{ApprovalID: id, ExpiresAt: expiresAt}); err != nil {
 			log.Printf("编码审批响应失败 trace_id=%s: %v", trace.IDFromContext(r.Context()), err)
@@ -255,38 +321,59 @@ func toolApprovalPrepareHandler(approvals *approvalStore, allowWrites bool) http
 	}
 }
 
-// toolApprovalConfirmHandler 只接受审批密钥持有者对指定审批请求的明确确认。
-func toolApprovalConfirmHandler(approvals *approvalStore, token string, allowWrites bool) http.HandlerFunc {
+// toolApprovalConfirmHandler 只接受审批密钥持有者对指定审批请求的明确确认，并落审计。
+func toolApprovalConfirmHandler(traceDir string, approvals *approvalStore, token string, allowWrites bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		status := "invalid_request"
+		audit, auditErr := beginApprovalAudit(traceDir, "confirm", r)
+		if audit != nil {
+			defer func() { audit.finish(status) }()
+		} else {
+			log.Printf("创建审批审计 trace 失败：%v", auditErr)
+		}
 		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")
+			status = "method_not_allowed"
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", status)
 			return
 		}
 		if !allowWrites {
-			writeError(w, http.StatusForbidden, "write tools are disabled", "permission_error", "tool_writes_disabled")
+			status = "tool_writes_disabled"
+			writeError(w, http.StatusForbidden, "write tools are disabled", "permission_error", status)
 			return
 		}
-		if !validApprovalToken(r.Header.Get("Authorization"), token) {
-			writeError(w, http.StatusUnauthorized, "approval authentication failed", "authentication_error", "invalid_approval_token")
+		if audit == nil {
+			status = "trace_unavailable"
+			writeError(w, http.StatusServiceUnavailable, "approval audit trace is unavailable", "server_error", status)
 			return
 		}
+		if !validBearerToken(r.Header.Get("Authorization"), token) {
+			status = "invalid_approval_token"
+			writeError(w, http.StatusUnauthorized, "approval authentication failed", "authentication_error", status)
+			return
+		}
+		audit.event.Approver = approvalKeyID(token)
 		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/tools/approvals/"), "/confirm")
 		if id == r.URL.Path || !trace.ValidID(id) {
-			writeError(w, http.StatusNotFound, "approval is not found", "invalid_request_error", "approval_not_found")
+			status = "approval_not_found"
+			writeError(w, http.StatusNotFound, "approval is not found", "invalid_request_error", status)
 			return
 		}
+		audit.event.ApprovalID = id
 		var confirmation approvalConfirmation
 		if !decodeStrictRequest(w, r, &confirmation) {
 			return
 		}
 		if !confirmation.Confirmed {
-			writeError(w, http.StatusBadRequest, "confirmed must be true", "invalid_request_error", "approval_confirmation_required")
+			status = "approval_confirmation_required"
+			writeError(w, http.StatusBadRequest, "confirmed must be true", "invalid_request_error", status)
 			return
 		}
 		if err := approvals.Confirm(id); err != nil {
+			status = approvalErrorCode(err)
 			writeApprovalError(w, err)
 			return
 		}
+		status = "confirmed"
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]string{"approval_id": id, "status": "confirmed"}); err != nil {
 			log.Printf("编码审批确认响应失败 trace_id=%s: %v", trace.IDFromContext(r.Context()), err)
@@ -321,7 +408,7 @@ func decodeStrictRequest(w http.ResponseWriter, r *http.Request, target any) boo
 	return true
 }
 
-func validApprovalToken(header, token string) bool {
+func validBearerToken(header, token string) bool {
 	const prefix = "Bearer "
 	return token != "" && strings.HasPrefix(header, prefix) &&
 		subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(header, prefix)), []byte(token)) == 1

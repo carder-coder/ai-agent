@@ -41,6 +41,18 @@ type ToolEvent struct {
 	Status         string `json:"status"`
 }
 
+// ApprovalEvent 记录写操作审批的发起与确认；审批密钥只保留摘要，不落原文。
+type ApprovalEvent struct {
+	ApprovalID string `json:"approval_id,omitempty"`
+	Action     string `json:"action"`
+	Tool       string `json:"tool,omitempty"`
+	Caller     string `json:"caller,omitempty"`
+	Approver   string `json:"approver,omitempty"`
+	Parameters any    `json:"parameters,omitempty"`
+	Status     string `json:"status"`
+	DurationMS int64  `json:"duration_ms"`
+}
+
 // Recorder 将单次网关请求的模型调用和汇总写入 JSONL 文件。
 type Recorder struct {
 	mu        sync.Mutex
@@ -193,6 +205,31 @@ func (r *Recorder) recordToolLocked(kind string, event ToolEvent) error {
 		"result_summary":  event.ResultSummary,
 		"duration_ms":     event.DurationMS,
 		"status":          event.Status,
+	})
+}
+
+// RecordProviderSwitch 记录主备切换，便于按 trace ID 复核切换耗时与次数。
+func (r *Recorder) RecordProviderSwitch(previous, active, reason string, elapsedMS int64, switchCount int) error {
+	return r.writeEvent("provider_switch", map[string]any{
+		"previous":     previous,
+		"active":       active,
+		"reason":       reason,
+		"elapsed_ms":   elapsedMS,
+		"switch_count": switchCount,
+	})
+}
+
+// RecordApproval 写入审批发起或确认事件，供事后核对谁在何时批准了哪组参数。
+func (r *Recorder) RecordApproval(event ApprovalEvent) error {
+	return r.writeEvent("approval", map[string]any{
+		"approval_id": event.ApprovalID,
+		"action":      event.Action,
+		"tool":        event.Tool,
+		"caller":      event.Caller,
+		"approver":    event.Approver,
+		"parameters":  event.Parameters,
+		"status":      event.Status,
+		"duration_ms": event.DurationMS,
 	})
 }
 

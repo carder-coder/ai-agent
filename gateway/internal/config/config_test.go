@@ -55,11 +55,14 @@ func TestLoadUsesGatewayDefaults(t *testing.T) {
 		cfg.BudgetMaxOutputTokens != 4096 || cfg.BudgetStateFile != "traces/budget.json" {
 		t.Fatalf("unexpected budget defaults: %+v", cfg)
 	}
-	if cfg.ToolWorkspace != ".." {
-		t.Fatalf("tool workspace = %q, want ..", cfg.ToolWorkspace)
+	if cfg.ToolWorkspace != "tool-workspace" {
+		t.Fatalf("tool workspace = %q, want tool-workspace", cfg.ToolWorkspace)
 	}
 	if cfg.ToolsAllowWrites || cfg.ToolApprovalToken != "" {
 		t.Fatalf("write tools must default to disabled: %+v", cfg)
+	}
+	if cfg.ProviderBackup != "" || cfg.FailoverThreshold != 3 || cfg.AdminToken != "" {
+		t.Fatalf("unexpected failover defaults: %+v", cfg)
 	}
 }
 

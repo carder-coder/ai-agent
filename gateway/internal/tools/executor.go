@@ -42,16 +42,22 @@ type cappedBuffer struct {
 	truncated bool
 }
 
-// NewExecutor 创建将命令限制在指定工作区的工具执行器。
+// NewExecutor 创建将命令限制在指定工作区的工具执行器；工作区缺失时按 0700 创建。
 func NewExecutor(workspace string, allowWrites bool) (*Executor, error) {
-	if workspace == "" {
-		workspace = "."
+	if strings.TrimSpace(workspace) == "" {
+		workspace = "tool-workspace"
 	}
 	absolute, err := filepath.Abs(workspace)
 	if err != nil {
 		return nil, fmt.Errorf("resolve tool workspace: %w", err)
 	}
 	info, err := os.Stat(absolute)
+	if errors.Is(err, os.ErrNotExist) {
+		if mkdirErr := os.MkdirAll(absolute, 0o700); mkdirErr != nil {
+			return nil, fmt.Errorf("create tool workspace: %w", mkdirErr)
+		}
+		info, err = os.Stat(absolute)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("inspect tool workspace: %w", err)
 	}
