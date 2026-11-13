@@ -47,6 +47,56 @@ trace 落在 `traces/<run_id>.jsonl`，每行一个事件（llm / tool / finish 
 `press_429.py` 支持 `--model`、`--concurrency`、`--rounds`、`--endpoint`，默认 8 并发、每路 20 次；
 它会真实发送最多 160 次模型请求并产生 API 费用。验证限流时优先指定低配额模型，仅在需要时运行。
 
+## 网关（第 3–5 周，`gateway/`）
+
+Go 模块，入口 `gateway/cmd/gateway`；默认豆包，可切 `mock` 离线验证。
+
+```powershell
+cd gateway
+$env:GATEWAY_PROVIDER="mock"; $env:GATEWAY_PORT="18080"   # 离线验证
+go run ./cmd/gateway
+```
+
+| 接口 | 说明 |
+| --- | --- |
+| `POST /v1/chat/completions` | 对话入口，按任务类型路由模型，写 `llm` trace |
+| `POST /v1/tools/execute` | 只执行注册工具（`inspect_text`/`workspace_status`/`write_note`），参数按 JSON Schema 校验 |
+| `POST /v1/tools/approvals` | 为写工具参数申请短时审批号（5 分钟、单次消费、绑定调用方与参数摘要） |
+| `POST /v1/tools/approvals/{id}/confirm` | 审批人用 `Authorization: Bearer <GATEWAY_TOOL_APPROVAL_TOKEN>` 明确确认 |
+| `GET /v1/trace/{id}` | 读取单次 trace JSONL（上限 8 MiB），可还原工具子调用与成本 |
+| `GET|POST /v1/admin/provider` | 查询/手动切换 Provider；需 `GATEWAY_ADMIN_TOKEN`，未配置时返回 404 |
+
+```powershell
+# 工具执行（只读）
+curl.exe -s -X POST http://127.0.0.1:18080/v1/tools/execute `
+  -H "Content-Type: application/json" `
+  -d '{"tool":"inspect_text","arguments":{"text":"hello world"}}'
+
+# 主备切换：环境变量 GATEWAY_PROVIDER_BACKUP=mock、GATEWAY_ADMIN_TOKEN=<32+ 字符>
+curl.exe -s -X POST http://127.0.0.1:18080/v1/admin/provider `
+  -H "Authorization: Bearer $env:GATEWAY_ADMIN_TOKEN" `
+  -H "Content-Type: application/json" -d '{"provider":"backup"}'
+```
+
+Provider 主备切换：主 Provider 连续不可用达到 `GATEWAY_FAILOVER_THRESHOLD`（默认 3）次后，
+在同一请求内切到备用并重试一次；上游 5xx 只切换不重放；切换后不会自动切回，只能手动切回。
+配置项见 `.env.example`（`GATEWAY_PROVIDER_BACKUP`、`GATEWAY_FAILOVER_THRESHOLD`、
+`GATEWAY_ADMIN_TOKEN`）。
+
+```powershell
+go test ./...                     # 全量单测
+go vet ./...                      # 静态检查
+go test -race ./internal/api ./internal/provider/... ./internal/tools
+
+# 压测（持续模式仅允许 localhost，≤200 并发、≤30 分钟）
+go build -o loadtest.exe ./cmd/loadtest
+.\loadtest.exe --duration 30m --c 200 --method GET --url http://127.0.0.1:18080/healthz
+```
+
+工具工作区默认 `tool-workspace`，目录缺失时按 0700 自动创建；写工具默认关闭，开启需同时设置
+`GATEWAY_TOOLS_ALLOW_WRITES=true` 与 ≥32 字符的 `GATEWAY_TOOL_APPROVAL_TOKEN`。
+越权与注入样本集在 `cases/tool_abuse_cases.json`，由 `gateway/internal/api/tool_abuse_cases_test.go` 逐条断言。
+
 ## 上下文策略（第 2 周）
 
 `--context-strategy` 一个参数切换四种装配方式，系统提示、工具 schema 与提示模板都不变：
